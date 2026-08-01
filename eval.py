@@ -15,6 +15,7 @@ from config.warmup_config.warmup import GradualWarmupScheduler
 from loss.loss_function import segmentation_loss
 from model.HFF import HFFNet
 from loader.dataload3d import get_loaders
+from utils.utils import get_device
 from warnings import simplefilter
 
 simplefilter(action='ignore', category=FutureWarning)
@@ -22,8 +23,9 @@ simplefilter(action='ignore', category=FutureWarning)
 
 def init_seeds(seed):
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     random.seed(seed)
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(0)
@@ -79,17 +81,19 @@ if __name__ == '__main__':
     parser.add_argument('-b','--batch_size', type=int, default=1)
     parser.add_argument('-l','--loss', type=str, default='dice')
     parser.add_argument('--loss2', type=str, default='ff')
+    parser.add_argument('--output_dir', type=str, default='./result/eval')
     args = parser.parse_args()
     
+    device = get_device()
     init_seeds(42)
     os.makedirs(args.output_dir, exist_ok=True)
 
     mapping = make_label_mapping(args.dataset_name, args.class_type)
     classnum = 4 if args.class_type=='all' else 2
-    criterion = segmentation_loss(args.loss, False, cn=classnum).cuda()
+    criterion = segmentation_loss(args.loss, False, cn=classnum).to(device)
     # load model
-    model = HFFNet(4,16,classnum).cuda()
-    state_dict = torch.load(args.checkpoint, map_location='cuda')
+    model = HFFNet(4,16,classnum).to(device)
+    state_dict = torch.load(args.checkpoint, map_location='cpu')
     model.load_state_dict(state_dict)
     model.eval()
 
@@ -114,16 +118,18 @@ if __name__ == '__main__':
             low_freq_inputs = []
             high_freq_inputs = []
             for j in range(20):
-                tensor = data[j].unsqueeze(1).cuda()
+                tensor = data[j].unsqueeze(1).to(device=device, dtype=torch.float32)
                 if j in [0,1,2,3]:
                     low_freq_inputs.append(tensor)
                 else:
                     high_freq_inputs.append(tensor)
             low = torch.cat(low_freq_inputs, dim=1)
             high = torch.cat(high_freq_inputs, dim=1)
-            mask_val = mask_to_class_indices(data[20], mapping).long().cuda()
+            mask_val = mask_to_class_indices(data[20], mapping).long().to(device)
 
             outputs_val_1, outputs_val_2, side1, side2 = model(low, high)
+            loss1 = criterion(outputs_val_1, mask_val)
+            loss2 = criterion(outputs_val_2, mask_val)
             outputs_val_1_cpu = outputs_val_1.detach().cpu()
             outputs_val_2_cpu = outputs_val_2.detach().cpu()
             mask_cpu = mask_val.detach().cpu()
@@ -137,8 +143,6 @@ if __name__ == '__main__':
                 score_list_val_2 = torch.cat((score_list_val_2, outputs_val_2_cpu), dim=0)
                 mask_list_val = torch.cat((mask_list_val, mask_cpu), dim=0)
 
-            loss1 = criterion(outputs_val_1_cpu, mask_cpu)
-            loss2 = criterion(outputs_val_2_cpu, mask_cpu)
             val_loss_sup_1 += loss1.item()
             val_loss_sup_2 += loss2.item()
 

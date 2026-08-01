@@ -4,6 +4,8 @@ import torch.distributions as td
 import torch.nn.functional as F
 from einops import rearrange
 
+from utils.utils import get_device
+
 BatchNorm3d = nn.InstanceNorm3d
 BN_MOMENTUM = 0.1
 
@@ -482,9 +484,10 @@ def hff_net(in_chs1,in_chs2, num_classes):
 
 if __name__ == "__main__":
     # from thop import profile
-    model = hff_net(4,16, 4).cuda()
-    input1 = torch.rand(1, 4, 128, 128, 128).cuda()
-    input2 = torch.rand(1, 16, 128, 128, 128).cuda()
+    device = get_device()
+    model = hff_net(4,16, 4).to(device)
+    input1 = torch.rand(1, 4, 128, 128, 128, device=device)
+    input2 = torch.rand(1, 16, 128, 128, 128, device=device)
     x1_1_main, x1_1_aux1, x2, x3 = model(input1, input2)
     #     loss_train = criterion(x1_1_main, mask)
     #     loss_train.backward()

@@ -7,6 +7,8 @@ import sys
 from torch.nn.modules.loss import _Loss
 import torch.fft
 
+from utils.utils import get_device
+
 
 
 class MixSoftmaxCrossEntropyLoss(nn.CrossEntropyLoss):
@@ -308,9 +310,10 @@ class FocalFrequencyLoss(nn.Module):
 
 
 if __name__=="__main__":
-    a = torch.randn(1, 1, 128, 128, 128).cuda()
-    b = torch.randn(1, 1, 128, 128, 128).cuda()
+    device = get_device()
+    a = torch.randn(1, 1, 128, 128, 128, device=device)
+    b = torch.randn(1, 1, 128, 128, 128, device=device)
 
-    m=FocalFrequencyLoss().cuda()
+    m=FocalFrequencyLoss().to(device)
     output=m(a,b)
     print(output)

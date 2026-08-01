@@ -1,6 +1,8 @@
 import os
-import numpy as np
 import math
+
+import numpy as np
+import torch
 
 def missing_list():
     n = int(math.pow(2,4))
@@ -53,3 +55,16 @@ def center_crop(img, size):
     x, y = (h - size) // 2, (w - size) // 2
     img_ = img[x: x+size, y: y+size]
     return img_
+
+
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device('mps')
+    return torch.device('cpu')
+
+
+def clear_device_cache(device):
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()

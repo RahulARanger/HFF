@@ -16,6 +16,7 @@ from config.warmup_config.warmup import GradualWarmupScheduler
 from loss.loss_function import segmentation_loss
 from model.HFF import HFFNet
 from loader.dataload3d import get_loaders
+from utils.utils import clear_device_cache, get_device
 from warnings import simplefilter
 
 simplefilter(action='ignore', category=FutureWarning)
@@ -23,8 +24,9 @@ simplefilter(action='ignore', category=FutureWarning)
 
 def init_seeds(seed):
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     random.seed(seed)
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(0)
@@ -74,6 +76,7 @@ def mask_to_class_indices(mask, mapping):
 
 def compute_fisher_information(model, dataloader, criterion):
     model.eval()
+    device = next(model.parameters()).device
     fisher_information = {}
     for name, param in model.named_parameters():
         if name =='input_ed.conv.weight':
@@ -83,14 +86,14 @@ def compute_fisher_information(model, dataloader, criterion):
         low_freq_inputs = []
         high_freq_inputs = []
         for j in range(20):  # to fit model input
-            input_tensor = data[j].unsqueeze(dim=1).type(torch.cuda.FloatTensor)
+            input_tensor = data[j].unsqueeze(dim=1).to(device=device, dtype=torch.float32)
             if j in [0, 1, 2, 3]:
                 low_freq_inputs.append(input_tensor)
             else:
                 high_freq_inputs.append(input_tensor)
         low_freq_inputs = torch.cat(low_freq_inputs, dim=1)
         high_freq_inputs = torch.cat(high_freq_inputs, dim=1)
-        target = mask_to_class_indices(data[20], label_mapping).long().cuda()
+        target = mask_to_class_indices(data[20], label_mapping).long().to(device)
         outputs_train_1, outputs_train_2,side1,side2= model(low_freq_inputs, high_freq_inputs)
         loss_train_sup1 = criterion(outputs_train_1, target)
         loss_train_sup2 = criterion(outputs_train_2, target)
@@ -175,6 +178,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    device = get_device()
+
     wandb.init(project=str('learning rate=' + str(
         args.lr) + 'epochs=' + str(args.num_epochs) + '-step_size=' + str(args.step_size) + '-gamma=' + str(args.gamma) + 'weight between braches=' + str(args.unsup_weight) + 'warmup epochs=' + str(args.warm_up_duration) + str(args.dataset_name) + '_'+str(args.class_type) ))
 
@@ -219,12 +224,12 @@ if __name__ == '__main__':
 
     # Model
     model = HFFNet(4,16, classnum)
-    model = model.cuda()
+    model = model.to(device)
     # model = DistributedDataParallel(model, device_ids=[args.local_rank])
 
     # Training Strategy
-    criterion = segmentation_loss(args.loss, False,cn=classnum).cuda()
-    FFcriterion = segmentation_loss(args.loss2, True).cuda()
+    criterion = segmentation_loss(args.loss, False,cn=classnum).to(device)
+    FFcriterion = segmentation_loss(args.loss2, True).to(device)
 
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay= 5.3 * 10 ** args.wd)
     exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
@@ -287,8 +292,7 @@ if __name__ == '__main__':
             high_freq_inputs = []
 
             for j in range(20):  # Sort by --selected_modal parameter
-            
-                input_tensor = data[j].unsqueeze(dim=1).type(torch.cuda.FloatTensor)
+                input_tensor = data[j].unsqueeze(dim=1).to(device=device, dtype=torch.float32)
 
                 # Sort by --selected_modal parameter
                 if j in [0, 1, 2, 3]:
@@ -297,11 +301,11 @@ if __name__ == '__main__':
                     high_freq_inputs.append(input_tensor)
             low_freq_inputs = torch.cat(low_freq_inputs, dim=1)
             high_freq_inputs = torch.cat(high_freq_inputs, dim=1)
-            mask_train = mask_to_class_indices(data[20],label_mapping).long().cuda()
+            mask_train = mask_to_class_indices(data[20],label_mapping).long().to(device)
 
             optimizer.zero_grad()
             outputs_train_1, outputs_train_2,side1,side2 = model(low_freq_inputs, high_freq_inputs)
-            torch.cuda.empty_cache()
+            clear_device_cache(device)
     
          
            
@@ -357,7 +361,7 @@ if __name__ == '__main__':
                    "epoch": epoch})
 
         scheduler_warmup.step()
-        torch.cuda.empty_cache()
+        clear_device_cache(device)
 
         if count_iter % args.display_iter == 0:
 
@@ -367,7 +371,7 @@ if __name__ == '__main__':
                 train_loss_sup_1, train_loss_sup_2, train_loss_unsup,train_loss_reg, train_loss, num_batches, print_num,
                 print_num_half)
 
-            torch.cuda.empty_cache()
+            clear_device_cache(device)
 
             with torch.no_grad():
                 model.eval()
@@ -379,7 +383,7 @@ if __name__ == '__main__':
                     high_freq_inputs = []
 
                     for j in range(20):  # Sort by --selected_modal parameter
-                        input_tensor = data[j].unsqueeze(dim=1).type(torch.cuda.FloatTensor)
+                        input_tensor = data[j].unsqueeze(dim=1).to(device=device, dtype=torch.float32)
 
                         # Sort by --selected_modal parameter
                         if j in [0, 1, 2, 3]:
@@ -388,11 +392,13 @@ if __name__ == '__main__':
                             high_freq_inputs.append(input_tensor)
                     low_freq_inputs = torch.cat(low_freq_inputs, dim=1)
                     high_freq_inputs = torch.cat(high_freq_inputs, dim=1)
-                    mask_val = mask_to_class_indices(data[20],label_mapping).long().cuda()
+                    mask_val = mask_to_class_indices(data[20],label_mapping).long().to(device)
 
                     optimizer.zero_grad()
                     outputs_val_1, outputs_val_2,side1,side2 = model(low_freq_inputs, high_freq_inputs)
-                    torch.cuda.empty_cache()
+                    clear_device_cache(device)
+                    loss_val_sup_1 = criterion(outputs_val_1, mask_val)
+                    loss_val_sup_2 = criterion(outputs_val_2, mask_val)
                     outputs_val_1 = outputs_val_1.detach().cpu()
                     outputs_val_2 = outputs_val_2.detach().cpu()
                     mask_val = mask_val.detach().cpu()
@@ -405,8 +411,6 @@ if __name__ == '__main__':
                         score_list_val_2 = torch.cat((score_list_val_2, outputs_val_2), dim=0)
                         mask_list_val = torch.cat((mask_list_val, mask_val), dim=0)
 
-                    loss_val_sup_1 = criterion(outputs_val_1, mask_val)
-                    loss_val_sup_2 = criterion(outputs_val_2, mask_val)
                     val_loss_sup_1 += loss_val_sup_1.item()
                     val_loss_sup_2 += loss_val_sup_2.item()
 
@@ -416,7 +420,7 @@ if __name__ == '__main__':
 
 
 
-                torch.cuda.empty_cache()
+                clear_device_cache(device)
 
 
                 val_epoch_loss_sup_1, val_epoch_loss_sup_2 = print_val_loss(val_loss_sup_1, val_loss_sup_2, num_batches,
@@ -462,14 +466,14 @@ if __name__ == '__main__':
                                                                                val_eval_list_1, val_eval_list_2,
                                                                                path_trained_models,)
 
-                torch.cuda.empty_cache()
+                clear_device_cache(device)
 
              
                 print('-' * print_num)
                 print('| Epoch Time: {:.4f}s'.format((time.time() - begin_time) / args.display_iter).ljust(
                     print_num_minus, ' '), '|')
-            torch.cuda.empty_cache()
-        torch.cuda.empty_cache()
+            clear_device_cache(device)
+        clear_device_cache(device)
 
     time_elapsed = time.time() - since
     m, s = divmod(time_elapsed, 60)
