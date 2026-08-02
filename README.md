@@ -134,6 +134,16 @@ nsct_tbx_dir = './NSCT_BTS/nsct_toolbox'; % Ensure this path is relative to the 
 ```
 This process may take some time, so feel free to take a break while it runs. ☕️
 
+## 🖥️ Scan Viewer
+
+To inspect any BraTS subject interactively, run the local viewer:
+
+```bash
+streamlit run viewer_app.py
+```
+
+The viewer scans the dataset folder, lets you pick a subject and any NIfTI volumes in that folder, shows them side by side, overlays the segmentation mask when present, and renders the foreground segmentation as a 3D surface.
+
 ---
 After running frequency decomposition, each subject folder is expected to have the following structure:
 ```

@@ -1,0 +1,3 @@
+bash scripts/download_brats2019.sh --output-dir dataset/brats2019
+bash scripts/slicer.sh --limit 20 --train 80 --validation 15 --testing 5 --dataset-root dataset/brats2019/extracted --output-dir dataset/brats2019/splits
+bash scripts/generate_low_freq.sh --train-list dataset/brats2019/splits/train.txt --validation-list dataset/brats2019/splits/validation.txt --testing-list dataset/brats2019/splits/testing.txt --output-dir dataset/brats2019/low_freq --nlevels 3
