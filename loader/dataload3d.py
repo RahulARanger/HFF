@@ -7,6 +7,20 @@ import SimpleITK as sitk
 from utils import tsfm_tfusion
 import glob
 
+
+def resolve_volume_path(subject_dir, filename_stem):
+    """Resolve a volume regardless of whether it is stored as .nii or .nii.gz."""
+    candidates = [
+        os.path.join(subject_dir, f"{filename_stem}.nii.gz"),
+        os.path.join(subject_dir, f"{filename_stem}.nii"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(
+        f"Missing NIfTI volume. Tried: {', '.join(candidates)}"
+    )
+
 class Brain(data.Dataset):
     def __init__(self, data_file, selected_modal, inputs_transform=None,
                  labels_transform=None, t_join_transform=None, join_transform=None, phase='train'):
@@ -53,8 +67,7 @@ class Brain(data.Dataset):
         # label_path = image_path + '/BraTS20_Training_{}_{}.nii.gz'.format(pid, 'seg')
         # label_path = image_path + '/BraTS19_Training_{}_{}.nii.gz'.format(pid, 'seg')
         folder_name = os.path.basename(image_path)
-        label_filename = folder_name + '_seg.nii.gz'
-        label_path = os.path.join(image_path, label_filename)
+        label_path = resolve_volume_path(image_path, folder_name + '_seg')
         # label_path = image_path + '/{}-{}.nii'.format(pid, 'seg')
 
 
@@ -63,7 +76,9 @@ class Brain(data.Dataset):
         volumes = []
         crop_size = None
         for i in range(len(self.selected_modal)):
-            m_path = os.path.join(image_path, f"{folder_name}_{self.selected_modal[i]}.nii.gz")
+            m_path = resolve_volume_path(
+                image_path, f"{folder_name}_{self.selected_modal[i]}"
+            )
             # m_path = image_path + '/BraTS20_Training_{}_{}.nii.gz'.format(pid, self.selected_modal[i])
             # m_path = image_path + '/BraTS19_Training_{}_{}.nii.gz'.format(pid, self.selected_modal[i])
             # m_path = image_path + '/{}-{}.nii.gz'.format(pid, self.selected_modal[i])

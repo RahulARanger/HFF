@@ -596,13 +596,12 @@ def print_best_sup(num_classes, best_val_list, print_num):
 def print_best(num_classes, best_val_list, best_model, best_result, path_trained_model, print_num):
     if num_classes == 2:
 
-        torch.save(best_model.state_dict(), os.path.join(path_trained_model, 'best_Jc_{:.4f}.pth'.format(best_val_list[1])))
+        # Binary HFF validation metrics are returned as [dice, hd95].
+        torch.save(best_model.state_dict(), os.path.join(path_trained_model, 'best_dice_{:.4f}.pth'.format(best_val_list[0])))
 
         print('| Best  Result: {}'.format(best_result).ljust(print_num, ' '), '|')
-        print('| Best Val Thr: {:.4f}'.format(best_val_list[0]).ljust(print_num, ' '), '|')
-        print('| Best Val  Jc: {:.4f}'.format(best_val_list[1]).ljust(print_num, ' '), '|')
-        print('| Best Val  Dc: {:.4f}'.format(best_val_list[2]).ljust(print_num, ' '), '|')
-        print('| Best Val  Hd: {:.4f}'.format(best_val_list[3]).ljust(print_num, ' '), '|')
+        print('| Best Val Dice: {:.4f}'.format(best_val_list[0]).ljust(print_num, ' '), '|')
+        print('| Best Val HD95: {:.4f}'.format(best_val_list[1]).ljust(print_num, ' '), '|')
 
     else:
 
@@ -680,6 +679,5 @@ def save_test_3d(num_classes, score_test, name_test, threshold, path_seg_results
 
         output_image = tio.ScalarImage(tensor=pred_results.unsqueeze(0), affine=affine)
         output_image.save(os.path.join(path_seg_results, name_test))
-
 
 
