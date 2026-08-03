@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#PBS -N hff_high_freq
+#PBS -q workq
+#PBS -l select=1:ncpus=16:mem=64gb:ngpus=1
+#PBS -j oe
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+INPUT_PATH="${HFF_INPUT_PATH:-dataset/brats2019/splits/explore}"
+MATLAB_BIN="${HFF_MATLAB:-matlab}"
+
+if [[ "$INPUT_PATH" != /* ]]; then
+  INPUT_PATH="$REPO_ROOT/$INPUT_PATH"
+fi
+if [[ ! -d "$INPUT_PATH" ]]; then
+  echo "Error: input path not found: $INPUT_PATH" >&2
+  exit 1
+fi
+if ! command -v "$MATLAB_BIN" >/dev/null 2>&1; then
+  echo "Error: MATLAB executable not found: $MATLAB_BIN" >&2
+  exit 1
+fi
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  echo "Error: CUDA_VISIBLE_DEVICES is not set. Set it to the allocated MIG UUID from nvidia-smi -L." >&2
+  exit 1
+fi
+
+if [[ -n "${HFF_CONDA_ENV:-}" ]]; then
+  CONDA_BASE="${HFF_CONDA_BASE:-$(conda info --base)}"
+  # shellcheck disable=SC source= /etc/profile.d/conda.sh
+  source "$CONDA_BASE/etc/profile.d/conda.sh"
+  conda activate "$HFF_CONDA_ENV"
+fi
+
+export HFF_BASE_DIR="$INPUT_PATH"
+export HFF_NSCT_TOOLBOX="${HFF_NSCT_TOOLBOX:-$REPO_ROOT/NSCT_BTS/nsct_toolbox}"
+
+echo "[$(date)] Starting high-frequency generation on workq"
+echo "Input: $HFF_BASE_DIR"
+echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+"$MATLAB_BIN" -batch "run('$REPO_ROOT/NSCT_BTS/nsct_hf.m')"
+echo "[$(date)] High-frequency generation complete"

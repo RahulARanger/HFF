@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#PBS -N hff_train_et
+#PBS -q workq
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -j oe
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+TRAIN_LIST="${HFF_TRAIN_LIST:-dataset/brats2019/splits/explore/train.txt}"
+VAL_LIST="${HFF_VAL_LIST:-dataset/brats2019/splits/explore/validation.txt}"
+PYTHON_BIN="${HFF_PYTHON:-python}"
+
+for LIST_PATH in "$TRAIN_LIST" "$VAL_LIST"; do
+  if [[ "$LIST_PATH" != /* ]]; then
+    LIST_PATH="$REPO_ROOT/$LIST_PATH"
+  fi
+  if [[ ! -f "$LIST_PATH" ]]; then
+    echo "Error: list file not found: $LIST_PATH" >&2
+    exit 1
+  fi
+done
+
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  echo "Error: CUDA_VISIBLE_DEVICES is not set. Set it to the allocated MIG UUID from nvidia-smi -L." >&2
+  exit 1
+fi
+
+if [[ -n "${HFF_CONDA_ENV:-}" ]]; then
+  CONDA_BASE="${HFF_CONDA_BASE:-$(conda info --base)}"
+  # shellcheck disable=SC source= /etc/profile.d/conda.sh
+  source "$CONDA_BASE/etc/profile.d/conda.sh"
+  conda activate "$HFF_CONDA_ENV"
+fi
+
+export WANDB_MODE=offline
+
+echo "[$(date)] Starting HFF-Net ET training on workq"
+echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+"$PYTHON_BIN" train.py \
+  --train_list "$TRAIN_LIST" \
+  --val_list "$VAL_LIST" \
+  --dataset_name brats19 \
+  --class_type et \
+  --num_epochs 350 \
+  --batch_size 1
+echo "[$(date)] Training complete"

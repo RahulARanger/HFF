@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+#PBS -N hff_low_freq
+#PBS -q cpuq
+#PBS -l select=1:ncpus=16:mem=32gb
+#PBS -j oe
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+INPUT_PATH="${HFF_INPUT_PATH:-dataset/brats2019/splits/explore}"
+PYTHON_BIN="${HFF_PYTHON:-python}"
+
+if [[ "$INPUT_PATH" != /* ]]; then
+  INPUT_PATH="$REPO_ROOT/$INPUT_PATH"
+fi
+if [[ ! -d "$INPUT_PATH" ]]; then
+  echo "Error: input path not found: $INPUT_PATH" >&2
+  exit 1
+fi
+
+if [[ -n "${HFF_CONDA_ENV:-}" ]]; then
+  CONDA_BASE="${HFF_CONDA_BASE:-$(conda info --base)}"
+  # shellcheck disable=SC source= /etc/profile.d/conda.sh
+  source "$CONDA_BASE/etc/profile.d/conda.sh"
+  conda activate "$HFF_CONDA_ENV"
+fi
+
+echo "[$(date)] Starting low-frequency generation on CPU"
+echo "Input: $INPUT_PATH"
+"$PYTHON_BIN" scripts/generate_low_freq.py --path "$INPUT_PATH"
+echo "[$(date)] Low-frequency generation complete"

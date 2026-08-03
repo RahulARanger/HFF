@@ -131,12 +131,24 @@ The path can point directly to a split set such as `splits/base` or `splits/expl
 Then, to perform high-frequency transformation on MRI volumes, use the MATLAB wrapper script:
 
 ```bash
-bash scripts/generate_high_freq.sh --path yourpath/MICCAI_BraTS2020_TrainingData/ --nlevels 2,2
+bash scripts/generate_high_freq.sh --path yourpath/MICCAI_BraTS2020_TrainingData/
 ```
 
-If you want the high-frequency outputs written to a separate folder, add `--output-dir`. The `--nlevels` value controls the NSCT decomposition levels. If you pass one number, it is expanded to `N,N`; if you pass two comma-separated numbers, they are used directly. The underlying MATLAB entrypoint still lives at `./NSCT_BTS/nsct_hf.m`, so you can also run it directly inside MATLAB after setting the `HFF_BASE_DIR`, `HFF_NSCT_TOOLBOX`, and `HFF_NSCT_NLEVELS` environment variables.
+The high-frequency outputs are written beside the input scans. The underlying MATLAB entrypoint lives at `./NSCT_BTS/nsct_hf.m`, so you can also run it directly inside MATLAB after setting `HFF_BASE_DIR` and `HFF_NSCT_TOOLBOX`.
 
 This process may take some time, so feel free to take a break while it runs. ☕️
+
+### Running frequency generation and training with PBS
+
+PBS wrappers for the institute cluster are provided in `scripts/`. Submit them from the repository root:
+
+```bash
+qsub scripts/submit_low_freq_cpu.pbs
+qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID> scripts/submit_high_freq_gpu.pbs
+qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID> scripts/submit_train_gpu.pbs
+```
+
+The low-frequency job uses `cpuq` with 16 CPU cores. The high-frequency MATLAB job and training job use `workq`; `nsct_hf.m` already parallelizes subjects with `parfor`. Obtain the MIG UUID with `nvidia-smi -L` and pass it at submission time rather than hardcoding it. If the cluster environment is not already activated, add `-v HFF_CONDA_ENV=<environment-name>` to the relevant `qsub` command. Paths can be overridden with `HFF_INPUT_PATH`, `HFF_TRAIN_LIST`, and `HFF_VAL_LIST`.
 
 ## 🖥️ Scan Viewer
 
