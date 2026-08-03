@@ -119,19 +119,23 @@ your_data_path/
 ---
 ### 2. Frequency Decomposition
 
-To extract the low-frequency components of MRI volumes, run the Python script ```./DTCWT_LF.py```. You only need to modify the --data_root argument to point to your dataset location. For example, for BraTS 2020:
+To extract the low-frequency components of MRI volumes, run:
 
 ```
-python DTCWT_LF.py --data_root yourpath/MICCAI_BraTS2020_TrainingData/
+python scripts/generate_low_freq.py --path dataset/brats2019/splits/base --output-dir dataset/brats2019/low_freq
 ```
 
+The path can point directly to a split set such as `splits/base` or `splits/explore`, or to `splits` to discover both sets automatically. The script finds the `train`, `validation`, and `testing` folders inside the supplied root. Processing uses the fixed Python DTCWT level; there is no `--nlevels` option.
 
-Then, to perform high-frequency transformation on MRI volumes, use the Matlab script ```./NSCT_BTS/nsct_hf.m```
-Make sure the original MRI data is correctly organized. For example, in the BraTS 2020 case:
+
+Then, to perform high-frequency transformation on MRI volumes, use the MATLAB wrapper script:
+
+```bash
+bash scripts/generate_high_freq.sh --path yourpath/MICCAI_BraTS2020_TrainingData/ --nlevels 2,2
 ```
-baseDir = 'yourpath/MICCAI_BraTS2020_TrainingData';
-nsct_tbx_dir = './NSCT_BTS/nsct_toolbox'; % Ensure this path is relative to the current working directory
-```
+
+If you want the high-frequency outputs written to a separate folder, add `--output-dir`. The `--nlevels` value controls the NSCT decomposition levels. If you pass one number, it is expanded to `N,N`; if you pass two comma-separated numbers, they are used directly. The underlying MATLAB entrypoint still lives at `./NSCT_BTS/nsct_hf.m`, so you can also run it directly inside MATLAB after setting the `HFF_BASE_DIR`, `HFF_NSCT_TOOLBOX`, and `HFF_NSCT_NLEVELS` environment variables.
+
 This process may take some time, so feel free to take a break while it runs. ☕️
 
 ## 🖥️ Scan Viewer
@@ -143,6 +147,18 @@ streamlit run viewer_app.py
 ```
 
 The viewer scans the dataset folder, lets you pick a subject and any NIfTI volumes in that folder, shows them side by side, overlays the segmentation mask when present, and renders the foreground segmentation as a 3D surface.
+
+For a native, high-fidelity volume viewer, use Napari:
+
+```bash
+python napari_viewer.py --dataset-root your_data_path/MICCAI_BraTS_2019_Data_Training
+```
+
+Napari opens the four MRI scans and expected mask as linked tiles in a 2×3 grid. Use the layer list to toggle scans, the dimension sliders to move through the volume, and the 2D/3D controls to change the rendering mode. Select a specific subject with `--subject`, for example:
+
+```bash
+python napari_viewer.py --dataset-root your_data_path/MICCAI_BraTS_2019_Data_Training --subject HGG/BraTS19_2013_10_1
+```
 
 ---
 After running frequency decomposition, each subject folder is expected to have the following structure:
@@ -257,5 +273,3 @@ Both NSCT and DTCWT offer powerful frequency-domain signal processing tools that
 
 
 This repo is based in part on the works of [Zhou et al. (ICCV 2023)](https://openaccess.thecvf.com/content/ICCV2023/html/Zhou_XNet_Wavelet-Based_Low_and_High_Frequency_Fusion_Networks_for_Fully-_ICCV_2023_paper.html) and [Ganasala et al. (JDI 2014)](https://link.springer.com/article/10.1007/s10278-013-9664-x). We thank the authors for their valuable contributions, which inspired and guided our implementation.
-
-
