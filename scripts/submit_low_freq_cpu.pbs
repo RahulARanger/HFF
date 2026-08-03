@@ -14,7 +14,7 @@ INPUT_PATH="${HFF_INPUT_PATH:-dataset/brats2019/splits/explore}"
 PYTHON_BIN="${HFF_PYTHON:-python}"
 
 usage() {
-  echo "Usage: qsub scripts/submit_low_freq_cpu.pbs --path PATH"
+  echo "Usage: qsub -- scripts/submit_low_freq_cpu.pbs --path PATH"
 }
 
 while [[ $# -gt 0 ]]; do

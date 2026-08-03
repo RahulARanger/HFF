@@ -143,13 +143,15 @@ This process may take some time, so feel free to take a break while it runs. ☕
 PBS wrappers for the institute cluster are provided in `scripts/`. Submit them from the repository root:
 
 ```bash
-qsub scripts/submit_low_freq_cpu.pbs --path dataset/brats2019/splits/explore
+qsub -- scripts/submit_low_freq_cpu.pbs \
+  --path dataset/brats2019/splits/explore
 
 qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID> \
-  scripts/submit_high_freq_gpu.pbs --path dataset/brats2019/splits/explore
+  -- scripts/submit_high_freq_gpu.pbs \
+  --path dataset/brats2019/splits/explore
 
 qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID> \
-  scripts/submit_train_gpu.pbs \
+  -- scripts/submit_train_gpu.pbs \
   --train_list dataset/brats2019/splits/explore/train.txt \
   --val_list dataset/brats2019/splits/explore/validation.txt \
   --dataset_name brats19 \

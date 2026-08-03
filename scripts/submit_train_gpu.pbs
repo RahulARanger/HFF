@@ -19,7 +19,7 @@ NUM_EPOCHS=350
 BATCH_SIZE=1
 
 usage() {
-  echo "Usage: qsub scripts/submit_train_gpu.pbs [options]"
+  echo "Usage: qsub -- scripts/submit_train_gpu.pbs [options]"
   echo "  --train_list PATH   Training list"
   echo "  --val_list PATH     Validation list"
   echo "  --dataset_name NAME (default: $DATASET_NAME)"

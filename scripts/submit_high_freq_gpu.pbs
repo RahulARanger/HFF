@@ -14,7 +14,7 @@ INPUT_PATH="${HFF_INPUT_PATH:-dataset/brats2019/splits/explore}"
 MATLAB_BIN="${HFF_MATLAB:-matlab}"
 
 usage() {
-  echo "Usage: qsub scripts/submit_high_freq_gpu.pbs --path PATH [--toolbox-dir PATH]"
+  echo "Usage: qsub -- scripts/submit_high_freq_gpu.pbs --path PATH [--toolbox-dir PATH]"
 }
 
 while [[ $# -gt 0 ]]; do
