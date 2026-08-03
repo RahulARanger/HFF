@@ -11,6 +11,7 @@ import numpy as np
 import SimpleITK as sitk
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import QComboBox, QCompleter, QLabel, QPushButton, QVBoxLayout, QWidget
+from napari.utils.colormaps import Colormap
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -135,20 +136,38 @@ def suppress_background(volume: np.ndarray, reference: np.ndarray) -> np.ndarray
 
 
 def build_expected_overlay(volume: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
-    """Create an RGB volume showing a scan with the expected mask in red."""
+    """Encode a scan and expected mask for Napari's 3D scalar renderer.
+
+    Napari's 3D MIP renderer treats RGB volumes as scalar data.  Reserve the
+    top part of the scalar range for the expected mask and map that range to
+    red with ``EXPECTED_BLEND_COLORMAP``.
+    """
     lower, upper = contrast_limits(volume)
     if upper <= lower:
         normalized = np.zeros_like(volume, dtype=np.float32)
     else:
         normalized = np.clip((volume - lower) / (upper - lower), 0, 1)
 
-    overlay = np.repeat((normalized * 255).astype(np.uint8)[..., np.newaxis], 3, axis=-1)
+    overlay = normalized * 0.72
     if mask is not None:
         expected = resize_mask_to_shape(mask, volume.shape) > 0
-        overlay[expected, 0] = 255
-        overlay[expected, 1] = (overlay[expected, 1] * 0.2).astype(np.uint8)
-        overlay[expected, 2] = (overlay[expected, 2] * 0.2).astype(np.uint8)
-    return overlay
+        overlay[expected] = 1.0
+    return overlay.astype(np.float32)
+
+
+EXPECTED_BLEND_COLORMAP = Colormap(
+    colors=np.array(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.72, 0.72, 0.72, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    ),
+    controls=np.array([0.0, 0.72, 0.73, 1.0], dtype=np.float32),
+    name="scan + expected",
+)
 
 
 def find_frequency_file(scan_path: Path, band: str) -> Path | None:
@@ -329,6 +348,8 @@ class SubjectSelectorWidget(QWidget):
 
         for index in (0, 1, 3, 4):
             self.frequency_layers[index].contrast_limits = contrast_limits(layer_data[index])
+        for index in (2, 5):
+            self.frequency_layers[index].contrast_limits = (0.0, 1.0)
 
     def on_mode_changed(self, mode: str) -> None:
         frequency_mode = mode == "Frequency decomposition"
@@ -407,7 +428,8 @@ def add_subject_layers(viewer: napari.Viewer, dataset_root: Path, initial_subjec
     extra_layer = viewer.add_image(
         build_expected_overlay(volumes[initial_scan_name], mask),
         name=f"{initial_scan_name} + EXPECTED",
-        rgb=True,
+        colormap=EXPECTED_BLEND_COLORMAP,
+        contrast_limits=(0.0, 1.0),
         rendering="mip",
         opacity=0.6,
         blending="translucent",
@@ -432,7 +454,8 @@ def add_subject_layers(viewer: napari.Viewer, dataset_root: Path, initial_subjec
         viewer.add_image(
             build_expected_overlay(initial_low, mask),
             name=f"{initial_scan_name} — {initial_low_label} + EXPECTED",
-            rgb=True,
+            colormap=EXPECTED_BLEND_COLORMAP,
+            contrast_limits=(0.0, 1.0),
             visible=False,
             rendering="mip",
         ),
@@ -446,7 +469,8 @@ def add_subject_layers(viewer: napari.Viewer, dataset_root: Path, initial_subjec
         viewer.add_image(
             build_expected_overlay(initial_high, mask),
             name=f"{initial_scan_name} — {initial_high_label} + EXPECTED",
-            rgb=True,
+            colormap=EXPECTED_BLEND_COLORMAP,
+            contrast_limits=(0.0, 1.0),
             visible=False,
             rendering="mip",
         ),

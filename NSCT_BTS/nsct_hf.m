@@ -2,10 +2,16 @@
 clear; clc;
 
 % Patient data root directory (please change to your actual path)
-baseDir = '/home/mcga/phd/brats2020/versions/1/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData';
+baseDir = getenv('HFF_BASE_DIR');
+if isempty(baseDir)
+    baseDir = '/home/mcga/phd/brats2020/versions/1/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData';
+end
 
 % Add NSCT toolbox (recursively add all subdirectories)
-nsct_tbx_dir = '/home/mcga/phd/bra23/NSCT_BTS/nsct_toolbox';
+nsct_tbx_dir = getenv('HFF_NSCT_TOOLBOX');
+if isempty(nsct_tbx_dir)
+    nsct_tbx_dir = '/home/mcga/phd/bra23/NSCT_BTS/nsct_toolbox';
+end
 addpath(genpath(nsct_tbx_dir));
 rehash;
 
@@ -15,28 +21,34 @@ nlevels = [2, 2];      % 这里只取第一层高频分解，共4个方向 Here 
 pfilt   = 'pyrexc';    % 金字塔滤波器 pyramid filter
 dfilt   = 'cd';        % 方向滤波器 Directional filter
 
-% 获取所有患者文件夹（假设文件夹名称以 'BraTS20_Training_' 开头）
-% Get all patient folders (assuming folder names start with 'BraTS20_Training_')
-patientDirs = dir(fullfile(baseDir, 'BraTS20_Training_*'));
-% patientDirs = dir(fullfile(baseDir, 'BraTS-MEN-*'));
-% patientDirs = dir(fullfile(baseDir, 'BraTS19*'));
+% 获取输入根目录下所有患者文件夹（支持 train/validation/testing 等嵌套目录）
+% Get all patient folders below the input root, including nested split directories.
+patientDirs = dir(fullfile(baseDir, '**', 'BraTS*'));
+patientDirs = patientDirs([patientDirs.isdir]);
 
-% 转换为 cell 数组便于 parfor
-% Convert to cell array for parfor
-patientFolderNames = {patientDirs([patientDirs.isdir]).name};
+if isempty(patientDirs)
+    error('No BraTS subject folders found below input root: %s', baseDir);
+end
+
+% 转换为完整路径的 cell 数组便于 parfor
+% Convert full folder paths to a cell array for parfor.
+patientFolderPaths = arrayfun( ...
+    @(entry) fullfile(entry.folder, entry.name), ...
+    patientDirs, ...
+    'UniformOutput', false);
 
 % 使用 parfor 并行处理每个患者（注意不要在内部再嵌套 parfor）
 % Use parfor to process each patient in parallel (be careful not to nest parfor inside)
-parfor p = 1:length(patientFolderNames)
-    patientFolder = fullfile(baseDir, patientFolderNames{p});
+parfor p = 1:length(patientFolderPaths)
+    patientFolder = patientFolderPaths{p};
     fprintf('Processing patient folders:\n %s\n', patientFolder);
     
-    % 获取该患者文件夹下的 nii 文件（排除包含 'seg' 或 '_h' 或 '_l' 的文件）
-    % Get the nii files in the patient folder (excluding files containing 'seg' or '_h' or '_l')
+    % 获取该患者文件夹下的 nii 文件（排除包含 'seg' 或 '_h' 或 '_l' 或 '_r' 的文件）
+    % Get the nii files in the patient folder (excluding files containing 'seg', '_h', '_l', or '_r')
     niiFiles = dir(fullfile(patientFolder, '*.nii*'));
     for f = 1:length(niiFiles)
         niiName = niiFiles(f).name;
-        if contains(lower(niiName), 'seg') || contains(lower(niiName), '_h') || contains(lower(niiName), '_l')
+        if contains(lower(niiName), 'seg') || contains(lower(niiName), '_h') || contains(lower(niiName), '_l') || contains(lower(niiName), '_r')
             continue; % 跳过分割文件或已处理文件 Skip split files or processed files
         end
         

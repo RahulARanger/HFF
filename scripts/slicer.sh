@@ -156,14 +156,15 @@ def copy_subject_dirs(split_name: str, paths):
     for subject_dir in paths:
         target_dir = split_root / subject_dir.name
         shutil.copytree(subject_dir, target_dir, dirs_exist_ok=True)
+    return [split_root / subject_dir.name for subject_dir in paths]
 
-copy_subject_dirs('train', train_dirs)
-copy_subject_dirs('validation', validation_dirs)
-copy_subject_dirs('testing', testing_dirs)
+train_targets = copy_subject_dirs('train', train_dirs)
+validation_targets = copy_subject_dirs('validation', validation_dirs)
+testing_targets = copy_subject_dirs('testing', testing_dirs)
 
-write_paths(output_dir / 'train.txt', train_dirs)
-write_paths(output_dir / 'validation.txt', validation_dirs)
-write_paths(output_dir / 'testing.txt', testing_dirs)
+write_paths(output_dir / 'train.txt', train_targets)
+write_paths(output_dir / 'validation.txt', validation_targets)
+write_paths(output_dir / 'testing.txt', testing_targets)
 
 print(f'Found {len(subject_dirs)} subject folders under {dataset_root}')
 print(f'Selected first {len(selected)} subject folders')
