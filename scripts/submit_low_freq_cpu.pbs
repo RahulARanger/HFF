@@ -13,6 +13,29 @@ cd "$REPO_ROOT"
 INPUT_PATH="${HFF_INPUT_PATH:-dataset/brats2019/splits/explore}"
 PYTHON_BIN="${HFF_PYTHON:-python}"
 
+usage() {
+  echo "Usage: qsub scripts/submit_low_freq_cpu.pbs --path PATH"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --path)
+      [[ $# -ge 2 ]] || { echo "Error: --path requires a value" >&2; usage >&2; exit 1; }
+      INPUT_PATH="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
 if [[ "$INPUT_PATH" != /* ]]; then
   INPUT_PATH="$REPO_ROOT/$INPUT_PATH"
 fi

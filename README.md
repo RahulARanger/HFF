@@ -143,12 +143,22 @@ This process may take some time, so feel free to take a break while it runs. ☕
 PBS wrappers for the institute cluster are provided in `scripts/`. Submit them from the repository root:
 
 ```bash
-qsub scripts/submit_low_freq_cpu.pbs
-qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID> scripts/submit_high_freq_gpu.pbs
-qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID> scripts/submit_train_gpu.pbs
+qsub scripts/submit_low_freq_cpu.pbs --path dataset/brats2019/splits/explore
+
+qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID> \
+  scripts/submit_high_freq_gpu.pbs --path dataset/brats2019/splits/explore
+
+qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID> \
+  scripts/submit_train_gpu.pbs \
+  --train_list dataset/brats2019/splits/explore/train.txt \
+  --val_list dataset/brats2019/splits/explore/validation.txt \
+  --dataset_name brats19 \
+  --class_type et \
+  --num_epochs 350 \
+  --batch_size 1
 ```
 
-The low-frequency job uses `cpuq` with 16 CPU cores. The high-frequency MATLAB job and training job use `workq`; `nsct_hf.m` already parallelizes subjects with `parfor`. Obtain the MIG UUID with `nvidia-smi -L` and pass it at submission time rather than hardcoding it. If the cluster environment is not already activated, add `-v HFF_CONDA_ENV=<environment-name>` to the relevant `qsub` command. Paths can be overridden with `HFF_INPUT_PATH`, `HFF_TRAIN_LIST`, and `HFF_VAL_LIST`.
+The low-frequency job uses `cpuq` with 16 CPU cores. The high-frequency MATLAB job and training job use `workq`; `nsct_hf.m` already parallelizes subjects with `parfor`. Obtain the MIG UUID with `nvidia-smi -L` and pass it at submission time rather than hardcoding it. If the cluster environment is not already activated, add `-v HFF_CONDA_ENV=<environment-name>` to the relevant `qsub` command. All three wrappers accept command-line paths; environment variables `HFF_INPUT_PATH`, `HFF_TRAIN_LIST`, and `HFF_VAL_LIST` remain available as defaults.
 
 ## 🖥️ Scan Viewer
 

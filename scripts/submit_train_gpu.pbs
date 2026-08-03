@@ -13,6 +13,64 @@ cd "$REPO_ROOT"
 TRAIN_LIST="${HFF_TRAIN_LIST:-dataset/brats2019/splits/explore/train.txt}"
 VAL_LIST="${HFF_VAL_LIST:-dataset/brats2019/splits/explore/validation.txt}"
 PYTHON_BIN="${HFF_PYTHON:-python}"
+DATASET_NAME="brats19"
+CLASS_TYPE="et"
+NUM_EPOCHS=350
+BATCH_SIZE=1
+
+usage() {
+  echo "Usage: qsub scripts/submit_train_gpu.pbs [options]"
+  echo "  --train_list PATH   Training list"
+  echo "  --val_list PATH     Validation list"
+  echo "  --dataset_name NAME (default: $DATASET_NAME)"
+  echo "  --class_type TYPE   (default: $CLASS_TYPE)"
+  echo "  --num_epochs N      (default: $NUM_EPOCHS)"
+  echo "  --batch_size N      (default: $BATCH_SIZE)"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --train_list)
+      [[ $# -ge 2 ]] || { echo "Error: --train_list requires a value" >&2; usage >&2; exit 1; }
+      TRAIN_LIST="$2"
+      shift 2
+      ;;
+    --val_list)
+      [[ $# -ge 2 ]] || { echo "Error: --val_list requires a value" >&2; usage >&2; exit 1; }
+      VAL_LIST="$2"
+      shift 2
+      ;;
+    --dataset_name)
+      [[ $# -ge 2 ]] || { echo "Error: --dataset_name requires a value" >&2; usage >&2; exit 1; }
+      DATASET_NAME="$2"
+      shift 2
+      ;;
+    --class_type)
+      [[ $# -ge 2 ]] || { echo "Error: --class_type requires a value" >&2; usage >&2; exit 1; }
+      CLASS_TYPE="$2"
+      shift 2
+      ;;
+    --num_epochs)
+      [[ $# -ge 2 ]] || { echo "Error: --num_epochs requires a value" >&2; usage >&2; exit 1; }
+      NUM_EPOCHS="$2"
+      shift 2
+      ;;
+    --batch_size)
+      [[ $# -ge 2 ]] || { echo "Error: --batch_size requires a value" >&2; usage >&2; exit 1; }
+      BATCH_SIZE="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
 
 for LIST_PATH in "$TRAIN_LIST" "$VAL_LIST"; do
   if [[ "$LIST_PATH" != /* ]]; then
@@ -43,8 +101,8 @@ echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 "$PYTHON_BIN" train.py \
   --train_list "$TRAIN_LIST" \
   --val_list "$VAL_LIST" \
-  --dataset_name brats19 \
-  --class_type et \
-  --num_epochs 350 \
-  --batch_size 1
+  --dataset_name "$DATASET_NAME" \
+  --class_type "$CLASS_TYPE" \
+  --num_epochs "$NUM_EPOCHS" \
+  --batch_size "$BATCH_SIZE"
 echo "[$(date)] Training complete"

@@ -13,6 +13,34 @@ cd "$REPO_ROOT"
 INPUT_PATH="${HFF_INPUT_PATH:-dataset/brats2019/splits/explore}"
 MATLAB_BIN="${HFF_MATLAB:-matlab}"
 
+usage() {
+  echo "Usage: qsub scripts/submit_high_freq_gpu.pbs --path PATH [--toolbox-dir PATH]"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --path)
+      [[ $# -ge 2 ]] || { echo "Error: --path requires a value" >&2; usage >&2; exit 1; }
+      INPUT_PATH="$2"
+      shift 2
+      ;;
+    --toolbox-dir)
+      [[ $# -ge 2 ]] || { echo "Error: --toolbox-dir requires a value" >&2; usage >&2; exit 1; }
+      HFF_NSCT_TOOLBOX="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
 if [[ "$INPUT_PATH" != /* ]]; then
   INPUT_PATH="$REPO_ROOT/$INPUT_PATH"
 fi
