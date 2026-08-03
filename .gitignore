@@ -8,3 +8,4 @@ __pycache__/viewer_app.cpython-314.pyc
 *.log
 wandb
 result/checkpoints
+AGENTS.md
