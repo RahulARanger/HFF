@@ -57,11 +57,22 @@ if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
   exit 1
 fi
 
-if [[ -n "${HFF_CONDA_ENV:-}" ]]; then
-  CONDA_BASE="${HFF_CONDA_BASE:-$(conda info --base)}"
-  # shellcheck disable=SC source= /etc/profile.d/conda.sh
-  source "$CONDA_BASE/etc/profile.d/conda.sh"
-  conda activate "$HFF_CONDA_ENV"
+CONDA_ENV="${HFF_CONDA_ENV:-hffnet}"
+if [[ -n "$CONDA_ENV" ]]; then
+  CONDA_SH="${HFF_CONDA_SH:-}"
+  if [[ -z "$CONDA_SH" && -n "${HFF_CONDA_BASE:-}" ]]; then
+    CONDA_SH="$HFF_CONDA_BASE/etc/profile.d/conda.sh"
+  fi
+  if [[ -z "$CONDA_SH" ]] && command -v conda >/dev/null 2>&1; then
+    CONDA_SH="$(conda info --base)/etc/profile.d/conda.sh"
+  fi
+  if [[ -z "$CONDA_SH" || ! -f "$CONDA_SH" ]]; then
+    echo "Error: Conda is not initialized in PBS. Set HFF_CONDA_BASE or HFF_CONDA_SH." >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  source "$CONDA_SH"
+  conda activate "$CONDA_ENV"
 fi
 
 export HFF_BASE_DIR="$INPUT_PATH"

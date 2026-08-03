@@ -79,8 +79,8 @@ Clone this repo and install environment:
 ```
 git clone https://github.com/VinyehShaw/HFF.git
 cd HFF
-conda create -n hff python=3.8
-conda activate hff
+conda create -n hffnet python=3.8
+conda activate hffnet
 pip install -r requirements.txt
 ```
  Install [MATLAB]( https://www.mathworks.com/downloads/), please make sure to install the [Image Processing Toolbox](https://mathworks.com/products/image-processing.html) as an additional component.
@@ -143,15 +143,16 @@ This process may take some time, so feel free to take a break while it runs. ☕
 PBS wrappers for the institute cluster are provided in `scripts/`. Submit them from the repository root:
 
 ```bash
-qsub -- scripts/submit_low_freq_cpu.pbs \
+qsub -v HFF_CONDA_BASE=/path/to/conda -- \
+  "$PWD/scripts/submit_low_freq_cpu.pbs" \
   --path dataset/brats2019/splits/explore
 
-qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID> \
-  -- scripts/submit_high_freq_gpu.pbs \
+qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID>,HFF_CONDA_BASE=/path/to/conda \
+  -- "$PWD/scripts/submit_high_freq_gpu.pbs" \
   --path dataset/brats2019/splits/explore
 
-qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID> \
-  -- scripts/submit_train_gpu.pbs \
+qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID>,HFF_CONDA_BASE=/path/to/conda \
+  -- "$PWD/scripts/submit_train_gpu.pbs" \
   --train_list dataset/brats2019/splits/explore/train.txt \
   --val_list dataset/brats2019/splits/explore/validation.txt \
   --dataset_name brats19 \
@@ -160,7 +161,9 @@ qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID> \
   --batch_size 1
 ```
 
-The low-frequency job uses `cpuq` with 16 CPU cores. The high-frequency MATLAB job and training job use `workq`; `nsct_hf.m` already parallelizes subjects with `parfor`. Obtain the MIG UUID with `nvidia-smi -L` and pass it at submission time rather than hardcoding it. If the cluster environment is not already activated, add `-v HFF_CONDA_ENV=<environment-name>` to the relevant `qsub` command. All three wrappers accept command-line paths; environment variables `HFF_INPUT_PATH`, `HFF_TRAIN_LIST`, and `HFF_VAL_LIST` remain available as defaults.
+The low-frequency job uses `cpuq` with 16 CPU cores. The high-frequency MATLAB job and training job use `workq`; `nsct_hf.m` already parallelizes subjects with `parfor`. Obtain the MIG UUID with `nvidia-smi -L` and pass it at submission time rather than hardcoding it. PBS does not load interactive shell initialization, so provide the Conda installation path with `HFF_CONDA_BASE` (or provide the full `HFF_CONDA_SH` path). All three wrappers use the `hffnet` Conda environment by default; override it with `HFF_CONDA_ENV` if needed. All three wrappers accept command-line paths; environment variables `HFF_INPUT_PATH`, `HFF_TRAIN_LIST`, and `HFF_VAL_LIST` remain available as defaults.
+
+To monitor jobs, list your queued and running jobs with `qstat -u "$USER"`, inspect one job with `qstat -f JOB_ID`, and cancel it with `qdel JOB_ID`. The job ID is printed by `qsub` after submission. Since the wrappers use `#PBS -j oe`, standard output and error are combined; their location is shown by the `Output_Path` and `Error_Path` fields in `qstat -f JOB_ID`.
 
 ## 🖥️ Scan Viewer
 
