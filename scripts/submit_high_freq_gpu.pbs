@@ -52,23 +52,7 @@ if ! command -v "$MATLAB_BIN" >/dev/null 2>&1; then
   echo "Error: MATLAB executable not found: $MATLAB_BIN" >&2
   exit 1
 fi
-CONDA_ENV="${HFF_CONDA_ENV:-hffnet}"
-if [[ -n "$CONDA_ENV" ]]; then
-  CONDA_SH="${HFF_CONDA_SH:-}"
-  if [[ -z "$CONDA_SH" && -n "${HFF_CONDA_BASE:-}" ]]; then
-    CONDA_SH="$HFF_CONDA_BASE/etc/profile.d/conda.sh"
-  fi
-  if [[ -z "$CONDA_SH" ]] && command -v conda >/dev/null 2>&1; then
-    CONDA_SH="$(conda info --base)/etc/profile.d/conda.sh"
-  fi
-  if [[ -z "$CONDA_SH" || ! -f "$CONDA_SH" ]]; then
-    echo "Error: Conda is not initialized in PBS. Set HFF_CONDA_BASE or HFF_CONDA_SH." >&2
-    exit 1
-  fi
-  # shellcheck disable=SC1090
-  source "$CONDA_SH"
-  conda activate "$CONDA_ENV"
-fi
+
 
 export HFF_BASE_DIR="$INPUT_PATH"
 export HFF_NSCT_TOOLBOX="${HFF_NSCT_TOOLBOX:-$REPO_ROOT/NSCT_BTS/nsct_toolbox}"
