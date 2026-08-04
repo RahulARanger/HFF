@@ -10,3 +10,6 @@ wandb
 result/checkpoints
 AGENTS.md
 STDIN.*
+.ipynb_checkpoints
+*.gz
+result/cross_validation

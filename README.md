@@ -138,6 +138,27 @@ The high-frequency outputs are written beside the input scans. The underlying MA
 
 This process may take some time, so feel free to take a break while it runs. ☕️
 
+### Five-fold cross-validation training
+
+Use `cross_train.py` to train five independent models. It discovers every
+patient directory beneath the supplied dataset root, creates deterministic
+patient-level folds, and runs `train.py` sequentially once per held-out fold.
+The generated split lists, fold checkpoints, per-fold `training_metrics.json`,
+and aggregate `cross_validation_metrics.json` are saved under the results
+directory.
+
+```bash
+python cross_train.py \
+  dataset/brats2019/extracted/MICCAI_BraTS_2019_Data_Training \
+  --epochs 350 \
+  --results-dir result/cross_validation \
+  -- --dataset_name brats19 --class_type et --batch_size 1
+```
+
+The `--` separates cross-validation options from options forwarded directly to
+`train.py`. Run the same command with `--dry-run` to create and inspect the
+five fold lists without starting training.
+
 ### Running frequency generation and training with PBS
 
 PBS wrappers for the institute cluster are provided in `scripts/`. Submit them from the repository root:

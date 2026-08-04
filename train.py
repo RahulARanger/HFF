@@ -4,6 +4,7 @@ from torch.optim import lr_scheduler
 import argparse
 import time
 import os
+import json
 import numpy as np
 import random
 from tqdm import tqdm
@@ -73,6 +74,28 @@ def mask_to_class_indices(mask, mapping):
     for old, new in mapping.items():
         out[mask == old] = new
     return out
+
+
+def _json_metrics(values):
+    """Convert metric values, including NaN, into JSON-safe values."""
+    result = []
+    for value in values:
+        value = float(value)
+        result.append(value if np.isfinite(value) else None)
+    return result
+
+
+def save_training_metrics(path, args, history, best_result, best_metrics, best_epoch):
+    """Persist the epoch history and best validation metrics for an experiment."""
+    payload = {
+        'configuration': vars(args),
+        'epochs': history,
+        'best_result': best_result,
+        'best_epoch': best_epoch,
+        'best_validation_metrics': _json_metrics(best_metrics),
+    }
+    with open(path, 'w', encoding='utf-8') as metrics_file:
+        json.dump(payload, metrics_file, indent=2, allow_nan=False)
 
 def compute_fisher_information(model, dataloader, criterion):
     model.eval()
@@ -206,12 +229,15 @@ if __name__ == '__main__':
     path_trained_models = args.path_trained_models + '/' + str(os.path.split(args.dataset_name)[1]+ '/' + str(args.class_type) )
     if not os.path.exists(path_trained_models):
         os.makedirs(path_trained_models)
+
     path_trained_models = path_trained_models + '/' + str(args.network) + '-l=' + str(args.lr) + '-e=' + str(
         args.num_epochs) + '-s=' + str(args.step_size) + '-g=' + str(args.gamma) + '-b=' + str(
         args.batch_size) + '-cw=' + str(args.unsup_weight) + '-w=' + str(args.warm_up_duration) + '-' + str(
         args.sup_mark) + str(args.input1) + '-' + str(args.input2)
     if not os.path.exists(path_trained_models):
         os.makedirs(path_trained_models)
+
+    metrics_path = os.path.join(path_trained_models, 'training_metrics.json')
 
 
     
@@ -244,6 +270,8 @@ if __name__ == '__main__':
     best_model = model
     best_result = 'Result1'
     best_val_eval_list = [0 for i in range(1)]
+    best_epoch = None
+    metrics_history = []
 
     for epoch in range(args.num_epochs):
 
@@ -459,12 +487,36 @@ if __name__ == '__main__':
                         # "Val WT HD95 2": val_eval_list_2[5]
                     })
                 
+                previous_best_metrics = list(best_val_eval_list)
                 best_val_eval_list, best_model, best_result = save_val_best_3d_m(classnum, best_model,
                                                                                best_val_eval_list, best_result, model,
                                                                                model, score_list_val_1,
                                                                                score_list_val_2, mask_list_val,
                                                                                val_eval_list_1, val_eval_list_2,
                                                                                path_trained_models,)
+                if best_val_eval_list != previous_best_metrics:
+                    best_epoch = epoch + 1
+
+                metrics_history.append({
+                    'epoch': epoch + 1,
+                    'train_loss_supervised_branch_1': train_loss_sup_1 / num_batches['train_sup'],
+                    'train_loss_supervised_branch_2': train_loss_sup_2 / num_batches['train_sup'],
+                    'train_loss_unsupervised_frequency_fusion': train_loss_unsup / num_batches['train_sup'],
+                    'train_loss_regularization': train_loss_reg / num_batches['train_sup'],
+                    'train_loss_total': train_loss / num_batches['train_sup'],
+                    'validation_loss_branch_1': val_loss_sup_1 / num_batches['val'],
+                    'validation_loss_branch_2': val_loss_sup_2 / num_batches['val'],
+                    'validation_metrics_branch_1': _json_metrics(val_eval_list_1),
+                    'validation_metrics_branch_2': _json_metrics(val_eval_list_2),
+                })
+                save_training_metrics(
+                    metrics_path,
+                    args,
+                    metrics_history,
+                    best_result,
+                    best_val_eval_list,
+                    best_epoch,
+                )
 
                 clear_device_cache(device)
 
@@ -483,8 +535,6 @@ if __name__ == '__main__':
     print('| Training Completed In {:.0f}h {:.0f}mins {:.0f}s'.format(h, m, s).ljust(print_num_minus, ' '), '|')
     print('-' * print_num)
     print_best(classnum, best_val_eval_list, best_model, best_result, path_trained_models, print_num_minus)
+    save_training_metrics(metrics_path, args, metrics_history, best_result, best_val_eval_list, best_epoch)
     print('=' * print_num)
     wandb.finish()
-
-
-

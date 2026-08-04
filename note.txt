@@ -1,0 +1,14 @@
+To use the BraTS 2023 Data (“Data”) you must agree to the following Terms and Conditions.
+
+CC-BY-NC License Restriction: The Data is subject to a CC-BY-NC license.
+– You agree to include proper citations as delineated on the Data Access/Downloads page, including the attribution statement below.
+– Data can be used for non-commercial use only. See https://creativecommons.org/licenses/by-nc/4.0/
+
+Attribution Statement: Research publications must acknowledge the BraTS challenge organizing members as follows: "Data used in this publication were obtained as part of the Brain Tumor Segmentation (BraTS) Challenge project through Synapse ID: syn51156910."
+
+User Information: By accepting these terms and downloading the Data, you consent to Sage Bionetworks sharing your download activity and user information with the Challenge organizers to evaluate use of the Data, if requested for purposes related to the Data. Your permission allows Sage Bionetworks to disclose your Synapse username and any information you provide in your user profile. Challenge organizers may use your Synapse username to contact you for purposes related to the Data. See the Sage Bionetworks Privacy Policy for more information about privacy on the Synapse platform.
+
+Data Usage Agreement / Citations: You are free to use and/or refer to the BraTS 2023 datasets in your own research, provided that you always cite the flagship manuscript (published or pre-published) resulting from the Challenge, as well as the Challenge-specific manuscripts outlined on the Data Access/Downloads page
+
+
+
