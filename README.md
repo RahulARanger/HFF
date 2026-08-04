@@ -147,8 +147,7 @@ qsub -v HFF_CONDA_BASE=/path/to/conda -- \
   "$PWD/scripts/submit_low_freq_cpu.pbs" \
   --path dataset/brats2019/splits/explore
 
-qsub -v HFF_CONDA_BASE=/path/to/conda \
-  -- "$PWD/scripts/submit_high_freq_gpu.pbs" \
+qsub -- "$PWD/scripts/submit_high_freq_cpu.pbs" \
   --path dataset/brats2019/splits/explore
 
 qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID>,HFF_CONDA_BASE=/path/to/conda \
@@ -161,7 +160,7 @@ qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID>,HFF_CONDA_BASE=/path/to/conda 
   --batch_size 1
 ```
 
-The low-frequency and MATLAB high-frequency jobs use `cpuq` with 16 CPU cores. The high-frequency MATLAB code uses CPU `parfor` subject-level parallelism; it does not call `gpuArray`, `gpuDevice`, or another GPU API. Only the training job uses `workq` and requires `CUDA_VISIBLE_DEVICES`. PBS does not load interactive shell initialization, so provide the Conda installation path with `HFF_CONDA_BASE` (or provide the full `HFF_CONDA_SH` path). All three wrappers use the `hffnet` Conda environment by default; override it with `HFF_CONDA_ENV` if needed. All three wrappers accept command-line paths; environment variables `HFF_INPUT_PATH`, `HFF_TRAIN_LIST`, and `HFF_VAL_LIST` remain available as defaults.
+The low-frequency and MATLAB high-frequency jobs use `cpuq` with 16 CPU cores. Submit high-frequency work with `submit_high_freq_cpu.pbs`; `submit_high_freq_gpu.pbs` remains as a compatibility alias. The high-frequency MATLAB code uses CPU `parfor` subject-level parallelism; it does not call `gpuArray`, `gpuDevice`, or another GPU API. Only the training job uses `workq` and requires `CUDA_VISIBLE_DEVICES`. Conda is required for the low-frequency and training wrappers, but not for the MATLAB high-frequency wrapper. All wrappers accept command-line paths; environment variables `HFF_INPUT_PATH`, `HFF_TRAIN_LIST`, and `HFF_VAL_LIST` remain available as defaults.
 
 To monitor jobs, list your queued and running jobs with `qstat -u "$USER"`, inspect one job with `qstat -f JOB_ID`, and cancel it with `qdel JOB_ID`. The job ID is printed by `qsub` after submission. Since the wrappers use `#PBS -j oe`, standard output and error are combined; their location is shown by the `Output_Path` and `Error_Path` fields in `qstat -f JOB_ID`.
 
