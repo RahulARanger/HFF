@@ -147,7 +147,7 @@ qsub -v HFF_CONDA_BASE=/path/to/conda -- \
   "$PWD/scripts/submit_low_freq_cpu.pbs" \
   --path dataset/brats2019/splits/explore
 
-qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID>,HFF_CONDA_BASE=/path/to/conda \
+qsub -v HFF_CONDA_BASE=/path/to/conda \
   -- "$PWD/scripts/submit_high_freq_gpu.pbs" \
   --path dataset/brats2019/splits/explore
 
@@ -161,7 +161,7 @@ qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID>,HFF_CONDA_BASE=/path/to/conda 
   --batch_size 1
 ```
 
-The low-frequency job uses `cpuq` with 16 CPU cores. The high-frequency MATLAB job and training job use `workq`; `nsct_hf.m` already parallelizes subjects with `parfor`. Obtain the MIG UUID with `nvidia-smi -L` and pass it at submission time rather than hardcoding it. PBS does not load interactive shell initialization, so provide the Conda installation path with `HFF_CONDA_BASE` (or provide the full `HFF_CONDA_SH` path). All three wrappers use the `hffnet` Conda environment by default; override it with `HFF_CONDA_ENV` if needed. All three wrappers accept command-line paths; environment variables `HFF_INPUT_PATH`, `HFF_TRAIN_LIST`, and `HFF_VAL_LIST` remain available as defaults.
+The low-frequency and MATLAB high-frequency jobs use `cpuq` with 16 CPU cores. The high-frequency MATLAB code uses CPU `parfor` subject-level parallelism; it does not call `gpuArray`, `gpuDevice`, or another GPU API. Only the training job uses `workq` and requires `CUDA_VISIBLE_DEVICES`. PBS does not load interactive shell initialization, so provide the Conda installation path with `HFF_CONDA_BASE` (or provide the full `HFF_CONDA_SH` path). All three wrappers use the `hffnet` Conda environment by default; override it with `HFF_CONDA_ENV` if needed. All three wrappers accept command-line paths; environment variables `HFF_INPUT_PATH`, `HFF_TRAIN_LIST`, and `HFF_VAL_LIST` remain available as defaults.
 
 To monitor jobs, list your queued and running jobs with `qstat -u "$USER"`, inspect one job with `qstat -f JOB_ID`, and cancel it with `qdel JOB_ID`. The job ID is printed by `qsub` after submission. Since the wrappers use `#PBS -j oe`, standard output and error are combined; their location is shown by the `Output_Path` and `Error_Path` fields in `qstat -f JOB_ID`.
 
@@ -272,6 +272,10 @@ To evaluate a trained model, run ```./eval.py``` with the following arguments:
 ```--checkpoint```: path to the trained model checkpoint
 
 ```--test_list```: path to the .txt file listing MRI samples to evaluate
+
+```--output_dir```: directory where one restored prediction is written per sample as
+`<subject>_oseg.nii.gz` (default: `./result/eval`). The prediction is restored to the
+original subject volume shape and copied to the reference image geometry.
 
 
 ---

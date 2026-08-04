@@ -9,3 +9,4 @@ __pycache__/viewer_app.cpython-314.pyc
 wandb
 result/checkpoints
 AGENTS.md
+STDIN.*
