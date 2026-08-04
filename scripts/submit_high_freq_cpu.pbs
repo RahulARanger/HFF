@@ -59,5 +59,5 @@ export HFF_NSCT_TOOLBOX="${HFF_NSCT_TOOLBOX:-$REPO_ROOT/NSCT_BTS/nsct_toolbox}"
 
 echo "[$(date)] Starting high-frequency generation on CPU via cpuq"
 echo "Input: $HFF_BASE_DIR"
-"$MATLAB_BIN" -batch "run('$REPO_ROOT/NSCT_BTS/nsct_hf.m')"
+"$MATLAB_BIN" -licmode onlinelicensing -batch "run('$REPO_ROOT/NSCT_BTS/nsct_hf.m')"
 echo "[$(date)] High-frequency generation complete"

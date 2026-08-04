@@ -3,20 +3,40 @@ bash scripts/slicer.sh --dataset-root dataset/brats2019/extracted/MICCAI_BraTS_2
 python scripts/generate_low_freq.py --path dataset/brats2019/splits/explore
 bash scripts/generate_high_freq.sh --path dataset/brats2019/splits/explore
 
-WANDB_MODE=offline python train.py \
-  --train_list "dataset/brats2019/splits/explore/train.txt" \
-  --val_list "dataset/brats2019/splits/explore/validation.txt" \
-  --dataset_name brats19 \
-  --class_type et \
-  --num_epochs 1 \
-  --batch_size 1
+qsub \
+-v HFF_CONDA_ENV=hffnet,HFF_CONDA_BASE=/apps/compilers/anaconda3 \
+  -- "/Data4/me_FA0498/Data_6/HFF/scripts/submit_low_freq_cpu.pbs" \
+  --path /Data4/me_FA0498/Data_6/HFF/dataset/brats2019/splits/base
 
 
+qsub \
+-v HFF_CONDA_ENV=hffnet,HFF_CONDA_BASE=/apps/compilers/anaconda3 \
+  -- "/Data4/me_FA0498/Data_6/HFF/scripts/submit_low_freq_cpu.pbs" \
+  --path /Data4/me_FA0498/Data_6/HFF/dataset/brats2019/splits/explore 
 
-  WANDB_MODE=offline python train.py \
-  --train_list "dataset/brats2019/splits/explore/train.txt" \
-  --val_list "dataset/brats2019/splits/explore/validation.txt" \
-  --dataset_name brats19 \
-  --class_type et \
-  --num_epochs 350 \
-  --batch_size 1
+qsub -v HFF_MATLAB=/Data4/me_FA0498/Data_6/MATLAB/R2026a/bin/matlab -- \
+  "/Data4/me_FA0498/Data_6/HFF/scripts/submit_high_freq_cpu.pbs" \
+  --path /Data4/me_FA0498/Data_6/HFF/dataset/brats2019/splits/base
+
+qsub -v HFF_MATLAB=/Data4/me_FA0498/Data_6/MATLAB/R2026a/bin/matlab -- \
+"/Data4/me_FA0498/Data_6/HFF/scripts/submit_high_freq_cpu.pbs" \
+--path /Data4/me_FA0498/Data_6/HFF/dataset/brats2019/splits/explore
+
+ ./mpm install \
+    --release=R2026a \
+    --destination=MATLAB/R2026a \
+    --products=MATLAB
+
+
+./mpm install \
+  --release=R2026a \
+  --destination=/Data4/me_FA0498/Data_6/MATLAB/R2026a \
+  --products=Image_Processing_Toolbox
+
+
+  ./mpm install \
+    --release=R2026a \
+    --destination=/Data4/me_FA0498/Data_6/MATLAB/R2026a
+    --products=MATLAB,Statistics_and_Machine_Learning_Toolbox,Image_Processing_Toolbox
+
+WANDB_MODE=offline python cross_train.py dataset/brats2019/splits/explore/train --epochs 1 -- --dataset_name brats19 --class_type all
