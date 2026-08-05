@@ -39,4 +39,4 @@ qsub -v HFF_MATLAB=/Data4/me_FA0498/Data_6/MATLAB/R2026a/bin/matlab -- \
     --destination=/Data4/me_FA0498/Data_6/MATLAB/R2026a
     --products=MATLAB,Statistics_and_Machine_Learning_Toolbox,Image_Processing_Toolbox
 
-WANDB_MODE=offline python cross_train.py dataset/brats2019/splits/explore/train --epochs 1 -- --dataset_name brats19 --class_type all
+WANDB_MODE=offline python cross_train.py dataset/brats2019/splits/explore/train --run-name explore_brats19 --epochs 1 -- --dataset_name brats19 --class_type all
