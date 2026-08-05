@@ -13,3 +13,4 @@ STDIN.*
 .ipynb_checkpoints
 *.gz
 result/cross_validation
+.virtual_documents

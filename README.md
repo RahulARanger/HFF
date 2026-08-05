@@ -117,6 +117,39 @@ your_data_path/
     └── BraTS20_Training_369/
 ```
 ---
+
+### BraTS 2020 train/validation/testing split
+
+For the extracted BraTS 2020 layout used in this repository, run:
+
+```bash
+python scripts/slice_brats2020.py --testing 20
+```
+
+The script uses these defaults relative to the current working directory:
+
+```text
+dataset/brats_2020/extracted/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData
+dataset/brats_2020/extracted/BraTS2020_ValidationData/MICCAI_BraTS2020_ValidationData
+```
+
+The training source is split into 80% `train` and 20% `validation`. The `--limit` argument optionally limits how many sorted training subjects are considered. The `--testing 20` argument independently takes 20% of the subjects in the BraTS 2020 validation source and places them in `testing`. Percentages are applied after sorting subject directory names, making the selection deterministic. The output is written to `dataset/brats_2020/splits` and includes `train.txt`, `validation.txt`, and `testing.txt` manifests.
+
+To change the split or paths:
+
+```bash
+python scripts/slice_brats2020.py \
+  --limit 300 \
+  --training 80 \
+  --validation 20 \
+  --testing 20 \
+  --output-dir /path/to/brats_2020/splits \
+  --training-root /path/to/MICCAI_BraTS2020_TrainingData \
+  --validation-root /path/to/MICCAI_BraTS2020_ValidationData
+```
+
+The script copies complete subject directories, so it works whether the NIfTI files are `.nii` or `.nii.gz` and does not require the validation download to contain segmentation labels.
+
 ### 2. Frequency Decomposition
 
 To extract the low-frequency components of MRI volumes, run:
@@ -144,20 +177,34 @@ Use `cross_train.py` to train five independent models. It discovers every
 patient directory beneath the supplied dataset root, creates deterministic
 patient-level folds, and runs `train.py` sequentially once per held-out fold.
 The generated split lists, fold checkpoints, per-fold `training_metrics.json`,
-and aggregate `cross_validation_metrics.json` are saved under the results
-directory.
+and aggregate `cross_validation_metrics.json` are saved in a new, immutable
+experiment subdirectory under the results directory. The directory defaults to
+a UTC timestamp and process ID, so a new run cannot replace earlier results.
+The run manifest records the split, forwarded training arguments, and the
+status of every fold. Use `--run-name` when you want a readable experiment
+name; reusing a name is rejected rather than overwriting the prior experiment.
 
 ```bash
 python cross_train.py \
   dataset/brats2019/extracted/MICCAI_BraTS_2019_Data_Training \
   --epochs 350 \
   --results-dir result/cross_validation \
+  --run-name brats19_et_seed42_baseline \
   -- --dataset_name brats19 --class_type et --batch_size 1
 ```
 
 The `--` separates cross-validation options from options forwarded directly to
 `train.py`. Run the same command with `--dry-run` to create and inspect the
-five fold lists without starting training.
+five fold lists without starting training. The resulting artifact structure is:
+
+```
+result/cross_validation/
+└── brats19_et_seed42_baseline/
+    ├── cross_validation_manifest.json
+    ├── cross_validation_metrics.json
+    ├── splits/
+    └── fold_1/ ... fold_5/
+```
 
 ### Running frequency generation and training with PBS
 
@@ -171,15 +218,18 @@ qsub -v HFF_CONDA_BASE=/path/to/conda -- \
 qsub -- "$PWD/scripts/submit_high_freq_cpu.pbs" \
   --path dataset/brats2019/splits/explore
 
-qsub -v CUDA_VISIBLE_DEVICES=<allocated-MIG-UUID>,HFF_CONDA_BASE=/path/to/conda \
+qsub -v HFF_GPU_DEVICE=<allocated-MIG-UUID>,HFF_CONDA_BASE=/path/to/conda \
   -- "$PWD/scripts/submit_train_gpu.pbs" \
-  --train_list dataset/brats2019/splits/explore/train.txt \
-  --val_list dataset/brats2019/splits/explore/validation.txt \
-  --dataset_name brats19 \
-  --class_type et \
-  --num_epochs 350 \
-  --batch_size 1
+  dataset/brats2019/splits/explore \
+  --run-name explore_brats19 \
+  --epochs 350 \
+  -- --dataset_name brats19 --class_type all
 ```
+
+The GPU wrapper forwards all options to `cross_train.py`; options after the
+second `--` are forwarded by `cross_train.py` to `train.py`. Select a single
+physical GPU or MIG UUID with `HFF_GPU_DEVICE` or `--gpu-device`. Inside the
+job, the selected device is visible to PyTorch as `cuda:0`.
 
 The low-frequency and MATLAB high-frequency jobs use `cpuq` with 16 CPU cores. Submit high-frequency work with `submit_high_freq_cpu.pbs`; `submit_high_freq_gpu.pbs` remains as a compatibility alias. The high-frequency MATLAB code uses CPU `parfor` subject-level parallelism; it does not call `gpuArray`, `gpuDevice`, or another GPU API. Only the training job uses `workq` and requires `CUDA_VISIBLE_DEVICES`. Conda is required for the low-frequency and training wrappers, but not for the MATLAB high-frequency wrapper. All wrappers accept command-line paths; environment variables `HFF_INPUT_PATH`, `HFF_TRAIN_LIST`, and `HFF_VAL_LIST` remain available as defaults.
 

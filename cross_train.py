@@ -13,12 +13,15 @@ identified by the presence of a ``*_seg.nii`` or ``*_seg.nii.gz`` file.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import logging
+import os
 from pathlib import Path
 import random
 import subprocess
 import sys
+import tempfile
 from typing import Any, Sequence
 
 
@@ -42,7 +45,19 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "--results-dir",
         type=Path,
         default=Path("result/cross_validation"),
-        help="Directory for fold lists, checkpoints, and metric summaries.",
+        help=(
+            "Parent directory for immutable cross-validation experiment runs "
+            "(default: result/cross_validation)."
+        ),
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help=(
+            "Optional name for this experiment directory. It must not already "
+            "exist and may contain only letters, numbers, '.', '_' and '-'."
+        ),
     )
     parser.add_argument(
         "--python",
@@ -98,6 +113,50 @@ def write_patient_list(path: Path, patients: Sequence[Path]) -> None:
     path.write_text("\n".join(str(patient) for patient in patients) + "\n", encoding="utf-8")
 
 
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically write a JSON artifact so an interrupted job leaves no partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as temporary_file:
+        json.dump(payload, temporary_file, indent=2, allow_nan=False)
+        temporary_file.write("\n")
+        temporary_path = Path(temporary_file.name)
+    temporary_path.replace(path)
+
+
+def validate_run_name(run_name: str) -> str:
+    """Validate a portable, single-directory experiment name."""
+    permitted_characters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    if not run_name or any(character not in permitted_characters for character in run_name):
+        raise ValueError("--run-name may contain only letters, numbers, '.', '_' and '-'.")
+    if run_name in {".", ".."}:
+        raise ValueError("--run-name must name a directory, not '.' or '..'.")
+    return run_name
+
+
+def create_run_directory(results_root: Path, requested_name: str | None) -> Path:
+    """Create and return a new experiment directory without reusing prior results."""
+    results_root.mkdir(parents=True, exist_ok=True)
+    if requested_name is not None:
+        run_name = validate_run_name(requested_name)
+        run_dir = results_root / run_name
+        try:
+            run_dir.mkdir()
+        except FileExistsError as error:
+            raise FileExistsError(
+                f"Experiment directory already exists: {run_dir}. Choose a new --run-name; "
+                "existing results are never overwritten."
+            ) from error
+        return run_dir
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+    # PID keeps simultaneous cluster submissions distinct even if their clocks align.
+    run_dir = results_root / f"run_{timestamp}_pid{os.getpid()}"
+    run_dir.mkdir()
+    return run_dir
+
+
 def read_fold_metrics(fold_dir: Path) -> dict[str, Any]:
     metrics_files = sorted(fold_dir.rglob("training_metrics.json"))
     if len(metrics_files) != 1:
@@ -139,9 +198,9 @@ def main() -> int:
 
     patients = find_patient_directories(args.dataset_dir)
     validation_folds = split_patients(patients, args.folds, args.seed)
-    results_dir = args.results_dir.expanduser().resolve()
+    results_root = args.results_dir.expanduser().resolve()
+    results_dir = create_run_directory(results_root, args.run_name)
     split_dir = results_dir / "splits"
-    results_dir.mkdir(parents=True, exist_ok=True)
 
     manifest: dict[str, Any] = {
         "dataset_dir": str(args.dataset_dir.expanduser().resolve()),
@@ -149,6 +208,9 @@ def main() -> int:
         "fold_count": args.folds,
         "split_seed": args.seed,
         "epochs_per_fold": args.epochs,
+        "forwarded_train_arguments": train_args,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "status": "prepared" if args.dry_run else "running",
         "folds": [],
     }
     fold_jobs: list[tuple[int, Path, Path, Path]] = []
@@ -168,13 +230,19 @@ def main() -> int:
                 "train_list": str(train_list),
                 "validation_list": str(validation_list),
                 "output_dir": str(fold_dir),
+                "status": "pending",
             }
         )
         fold_jobs.append((fold_index, train_list, validation_list, fold_dir))
 
     manifest_path = results_dir / "cross_validation_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    LOGGER.info("Created %d deterministic folds for %d patients in %s", args.folds, len(patients), results_dir)
+    write_json(manifest_path, manifest)
+    LOGGER.info(
+        "Created %d deterministic folds for %d patients in new experiment directory %s",
+        args.folds,
+        len(patients),
+        results_dir,
+    )
 
     if args.dry_run:
         return 0
@@ -183,6 +251,9 @@ def main() -> int:
     train_script = Path(__file__).with_name("train.py")
     for fold_index, train_list, validation_list, fold_dir in fold_jobs:
         fold_dir.mkdir(parents=True, exist_ok=True)
+        manifest["folds"][fold_index - 1]["status"] = "running"
+        manifest["folds"][fold_index - 1]["started_at_utc"] = datetime.now(timezone.utc).isoformat()
+        write_json(manifest_path, manifest)
         command = [
             args.python,
             str(train_script),
@@ -193,17 +264,30 @@ def main() -> int:
             *train_args,
         ]
         LOGGER.info("Starting fold %d/%d", fold_index, args.folds)
-        subprocess.run(command, check=True)
-        fold_results.append({"fold": fold_index, "metrics": read_fold_metrics(fold_dir)})
+        try:
+            subprocess.run(command, check=True)
+            fold_metrics = read_fold_metrics(fold_dir)
+        except (subprocess.CalledProcessError, OSError, RuntimeError, json.JSONDecodeError):
+            manifest["status"] = "failed"
+            manifest["failed_fold"] = fold_index
+            manifest["failed_at_utc"] = datetime.now(timezone.utc).isoformat()
+            manifest["folds"][fold_index - 1]["status"] = "failed"
+            write_json(manifest_path, manifest)
+            raise
+        fold_results.append({"fold": fold_index, "metrics": fold_metrics})
+        manifest["folds"][fold_index - 1]["status"] = "completed"
+        manifest["folds"][fold_index - 1]["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        write_json(manifest_path, manifest)
 
     summary = {
         "manifest": str(manifest_path),
         "fold_results": fold_results,
         "best_validation_metric_summary": summarise_metrics(fold_results),
     }
-    (results_dir / "cross_validation_metrics.json").write_text(
-        json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8"
-    )
+    write_json(results_dir / "cross_validation_metrics.json", summary)
+    manifest["status"] = "completed"
+    manifest["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+    write_json(manifest_path, manifest)
     LOGGER.info("Saved cross-validation metric summary to %s", results_dir / "cross_validation_metrics.json")
     return 0
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
 import napari
@@ -11,8 +10,16 @@ import numpy as np
 import SimpleITK as sitk
 import torch
 from qtpy.QtCore import Qt
-from qtpy.QtWidgets import QComboBox, QCompleter, QLabel, QPushButton, QVBoxLayout, QWidget
-from napari.utils.colormaps import DirectLabelColormap
+from qtpy.QtWidgets import (
+    QComboBox,
+    QCompleter,
+    QFileDialog,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+from napari.utils.colormaps import Colormap, DirectLabelColormap
 
 from model.HFF import HFFNet
 from utils.utils import get_device
@@ -43,15 +50,6 @@ def is_nifti_file(path: Path) -> bool:
 def is_frequency_file(path: Path) -> bool:
     stem = strip_nifti_suffix(path).lower()
     return stem.rsplit("_", 1)[-1] in {"l", "h", "h1", "h2", "h3", "h4"}
-
-
-def discover_subject_dirs(dataset_root: Path) -> list[Path]:
-    subjects = []
-    for current_dir, _, files in os.walk(dataset_root):
-        paths = [Path(current_dir) / name for name in files]
-        if any(path.name.endswith("_seg.nii") or path.name.endswith("_seg.nii.gz") for path in paths):
-            subjects.append(Path(current_dir))
-    return sorted(set(subjects))
 
 
 def modality_sort_key(path: Path) -> tuple[int, str]:
@@ -162,6 +160,7 @@ BRATS_LABEL_COLORMAP = DirectLabelColormap(
     },
     name="BraTS categorical labels",
 )
+SEGMENTATION_OVERLAY_VALUES = {1: 0.65, 2: 0.82, 3: 1.0}
 
 
 def canonical_segmentation_labels(mask: np.ndarray, target_shape: tuple[int, ...]) -> np.ndarray:
@@ -174,11 +173,10 @@ def canonical_segmentation_labels(mask: np.ndarray, target_shape: tuple[int, ...
 
 
 def build_segmentation_overlay(volume: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
-    """Composite an MRI scan with exact, discrete BraTS label colours.
+    """Encode MRI plus labels for Napari's scalar 3D renderer.
 
-    This produces an RGBA volume instead of encoding labels in scalar values.
-    The colours therefore exactly match ``BRATS_LABEL_COLORMAP`` and cannot be
-    mistaken for intensity contours by Napari.
+    The generated image is only a display composite. Output masks remain
+    discrete ``Labels`` layers with ``BRATS_LABEL_COLORMAP``.
     """
     lower, upper = contrast_limits(volume)
     if upper <= lower:
@@ -186,39 +184,33 @@ def build_segmentation_overlay(volume: np.ndarray, mask: np.ndarray | None) -> n
     else:
         normalized = np.clip((volume - lower) / (upper - lower), 0, 1)
 
-    overlay = np.repeat((normalized * 0.55)[..., np.newaxis], 4, axis=-1)
-    overlay[..., 3] = 1.0
+    overlay = normalized * 0.55
     if mask is not None:
         labels = canonical_segmentation_labels(mask, volume.shape)
-        categorical_colours = {
-            1: BRATS_SEGMENTATION_COLORS[1],
-            2: BRATS_SEGMENTATION_COLORS[2],
-            3: BRATS_SEGMENTATION_COLORS[4],
-        }
-        for label, colour in categorical_colours.items():
-            overlay[labels == label] = colour
+        for label, value in SEGMENTATION_OVERLAY_VALUES.items():
+            overlay[labels == label] = value
     return overlay.astype(np.float32)
+
+
+SEGMENTATION_BLEND_COLORMAP = Colormap(
+    colors=np.array(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.55, 0.55, 0.55, 1.0],
+            BRATS_SEGMENTATION_COLORS[1],
+            BRATS_SEGMENTATION_COLORS[2],
+            BRATS_SEGMENTATION_COLORS[4],
+        ],
+        dtype=np.float32,
+    ),
+    controls=np.array([0.0, 0.55, 0.65, 0.82, 1.0], dtype=np.float32),
+    name="BraTS segmentation overlay",
+)
 
 
 def build_output_overlay(volume: np.ndarray, output_mask: np.ndarray | None) -> np.ndarray:
     """Encode a scan and class-coloured generated prediction."""
     return build_segmentation_overlay(volume, output_mask)
-
-
-def build_comparison_overlay(
-    volume: np.ndarray,
-    expected_mask: np.ndarray | None,
-    output_mask: np.ndarray | None,
-) -> np.ndarray:
-    """Show output labels where present and expected labels elsewhere, by class."""
-    if output_mask is None:
-        return build_segmentation_overlay(volume, expected_mask)
-    output = canonical_segmentation_labels(output_mask, volume.shape)
-    expected = (
-        canonical_segmentation_labels(expected_mask, volume.shape)
-        if expected_mask is not None else np.zeros(volume.shape, dtype=np.uint8)
-    )
-    return build_segmentation_overlay(volume, np.where(output > 0, output, expected))
 
 
 def discover_checkpoints(results_root: Path) -> list[Path]:
@@ -244,6 +236,19 @@ def normalize_for_model(volume: np.ndarray) -> np.ndarray:
     if maximum <= minimum:
         return np.zeros_like(volume, dtype=np.float32)
     return (2.0 * ((volume - minimum) / (maximum - minimum)) - 1.0).astype(np.float32)
+
+
+def restrict_mask_to_scan_foreground(mask: np.ndarray, reference_scan: np.ndarray) -> np.ndarray:
+    """Remove predictions in transform padding outside the acquired MRI volume.
+
+    The HFF-Net predicts a fixed 128³ crop. Without this constraint, a model
+    can label the crop's zero-padded corners and the viewer shows a rectangular
+    box. The scan foreground is independent of the ground-truth segmentation.
+    """
+    foreground = reference_scan != reference_scan.flat[0]
+    cleaned = np.asarray(mask, dtype=np.uint8).copy()
+    cleaned[~foreground] = 0
+    return cleaned
 
 
 def foreground_center_crop(volumes: list[np.ndarray], crop_size: int = 128) -> tuple[list[np.ndarray], tuple[slice, slice, slice]]:
@@ -308,11 +313,26 @@ def generate_output_segmentation(checkpoint: Path, subject_dir: Path, results_ro
         output = output_low if "result1" in checkpoint.stem.lower() else output_high
         prediction = torch.argmax(output, dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
 
-    reference_path = modal_paths["flair"]
+    # Keep categorical labels intact if a future architecture returns a
+    # different spatial output size; never use linear interpolation for masks.
+    target_crop_shape = tuple(axis_slice.stop - axis_slice.start for axis_slice in crop)
+    prediction = resize_mask_to_shape(prediction, target_crop_shape).astype(np.uint8)
+
+    # Restore the prediction to the ground-truth segmentation geometry.  In
+    # BraTS these are normally identical to FLAIR, but using the segmentation
+    # as the reference keeps the generated label aligned when a dataset has
+    # different image and mask shapes or metadata.
+    segmentation_path = subject_files(subject_dir)[1]
+    reference_path = segmentation_path or modal_paths["flair"]
     reference_image = sitk.ReadImage(str(reference_path))
+    reference_volume = sitk.GetArrayFromImage(reference_image).astype(np.float32)
+    flair_volume = load_volume(modal_paths["flair"])
+    if flair_volume.shape != reference_volume.shape:
+        flair_volume = resize_volume_to_shape(flair_volume, reference_volume.shape)
     restored = np.zeros(tuple(reversed(reference_image.GetSize())), dtype=np.uint8)
     restored_crop = restored[3:, :, :]
     restored_crop[crop] = prediction
+    restored = restrict_mask_to_scan_foreground(restored, flair_volume)
     output_path = checkpoint_output_path(results_root, checkpoint, subject_dir)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_image = sitk.GetImageFromArray(restored)
@@ -324,11 +344,12 @@ def generate_output_segmentation(checkpoint: Path, subject_dir: Path, results_ro
 def find_frequency_file(scan_path: Path, band: str) -> Path | None:
     base = strip_nifti_suffix(scan_path)
     band = band.upper()
-    # High-frequency generation writes four directional bands (H1-H4), while
-    # the viewer has one high-frequency panel. Use H1 for that panel and keep
-    # support for the older single-file `_H` naming convention.
+    # High-frequency generation writes four directional bands (H1-H4). Keep
+    # support for the older single-file `_H` naming convention as a fallback.
     names = [band]
-    if band == "H":
+    if band in {"H1", "H2", "H3", "H4"}:
+        names.append("H")
+    elif band == "H":
         names = ["H1", "H2", "H3", "H4", "H"]
     candidates = [
         scan_path.with_name(f"{base}_{name}{suffix}")
@@ -373,25 +394,28 @@ class SubjectSelectorWidget(QWidget):
         self,
         viewer: napari.Viewer,
         dataset_root: Path,
-        subject_index: dict[str, Path],
+        initial_subject: Path,
         image_layers: list[napari.layers.Image],
         extra_layer: napari.layers.Image,
+        extra_mask_layer: napari.layers.Labels,
         mask_layer: napari.layers.Labels | None,
         frequency_layers: list[napari.layers.Image],
+        frequency_mask_layers: list[napari.layers.Labels],
         output_layers: list[napari.layers.Image | napari.layers.Labels],
         results_root: Path,
     ) -> None:
         super().__init__()
         # Keep the control dock compact so the image grid gets most of the
-        # window width. Long record paths are still searchable in the combo.
+        # window width.
         self.setFixedWidth(320)
         self.viewer = viewer
         self.dataset_root = dataset_root
-        self.subject_index = subject_index
         self.image_layers = image_layers
         self.extra_layer = extra_layer
+        self.extra_mask_layer = extra_mask_layer
         self.mask_layer = mask_layer
         self.frequency_layers = frequency_layers
+        self.frequency_mask_layers = frequency_mask_layers
         self.output_layers = output_layers
         self.results_root = results_root
         self.current_scan_index: dict[str, Path] = {}
@@ -413,15 +437,27 @@ class SubjectSelectorWidget(QWidget):
         self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
         layout.addWidget(self.mode_combo)
 
+        self.frequency_band_title = QLabel("High-frequency mode")
+        self.frequency_band_title.setStyleSheet("font-weight: 600; margin-top: 6px;")
+        layout.addWidget(self.frequency_band_title)
+
+        self.frequency_band_combo = QComboBox()
+        self.frequency_band_combo.addItems(["H1", "H2", "H3", "H4"])
+        self.frequency_band_combo.currentTextChanged.connect(self.on_frequency_band_changed)
+        layout.addWidget(self.frequency_band_combo)
+
         title = QLabel("Select record")
         title.setStyleSheet("font-weight: 600;")
         layout.addWidget(title)
 
-        self.combo = QComboBox()
-        self.combo.addItems(list(self.subject_index.keys()))
-        setup_searchable_combo(self.combo)
-        self.combo.currentTextChanged.connect(self.on_subject_changed)
-        layout.addWidget(self.combo)
+        self.select_record_button = QPushButton("Select record folder…")
+        self.select_record_button.clicked.connect(self.select_record_folder)
+        layout.addWidget(self.select_record_button)
+
+        self.selected_record = QLabel()
+        self.selected_record.setWordWrap(True)
+        self.selected_record.setStyleSheet("color: palette(mid); font-size: 11px;")
+        layout.addWidget(self.selected_record)
 
         extra_title = QLabel("Actual scan type")
         extra_title.setStyleSheet("font-weight: 600; margin-top: 6px;")
@@ -445,6 +481,9 @@ class SubjectSelectorWidget(QWidget):
         self.generate_button.clicked.connect(self.on_generate_output)
         layout.addWidget(self.generate_button)
 
+        self.set_checkpoint_controls_visible(False)
+        self.set_frequency_band_controls_visible(False)
+
         self.description = QLabel(
             "Input analysis shows the four scans, expected mask, and selected scan + expected. "
             "Frequency decomposition shows actual, low-frequency, and high-frequency views. "
@@ -455,9 +494,9 @@ class SubjectSelectorWidget(QWidget):
         layout.addWidget(self.description)
 
         self.legend = QLabel(
-            "Segmentation labels\n"
-            "■ Red — necrotic / non-enhancing core (1)\n"
-            "■ Blue — edema (2)\n"
+            "Segmentation labels: "
+            "■ Red — necrotic / non-enhancing core (1)   "
+            "■ Blue — edema (2)   "
             "■ Yellow — enhancing tumour (4; model class 3)"
         )
         self.legend.setWordWrap(True)
@@ -470,9 +509,37 @@ class SubjectSelectorWidget(QWidget):
 
         layout.addStretch(1)
 
-        initial_subject_name = next(iter(self.subject_index.keys()))
-        self.combo.setCurrentText(initial_subject_name)
-        self.on_subject_changed(initial_subject_name)
+        self.on_subject_changed(initial_subject)
+
+    def set_checkpoint_controls_visible(self, visible: bool) -> None:
+        """Show checkpoint controls only for the output-analysis view."""
+        for widget in (self.checkpoint_title, self.checkpoint_combo, self.generate_button):
+            widget.setVisible(visible)
+
+    def set_frequency_band_controls_visible(self, visible: bool) -> None:
+        """Show the directional high-frequency selector only in frequency view."""
+        for widget in (self.frequency_band_title, self.frequency_band_combo):
+            widget.setVisible(visible)
+
+    def select_record_folder(self) -> None:
+        """Select and load one BraTS record without scanning the dataset root."""
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select BraTS record folder",
+            str(self.dataset_root),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not selected:
+            return
+
+        selected_path = Path(selected).expanduser().resolve()
+        if not selected_path.is_dir() or subject_files(selected_path)[1] is None:
+            self.description.setText(
+                "That folder is not a BraTS record. Select a folder containing its _seg.nii or _seg.nii.gz file."
+            )
+            return
+
+        self.on_subject_changed(selected_path)
 
     def refresh_checkpoint_options(self) -> None:
         """Re-scan ``result`` whenever Output Analysis is opened."""
@@ -500,26 +567,42 @@ class SubjectSelectorWidget(QWidget):
         volume = load_volume(self.current_scan_index[scan_name])
         output = self.current_output_mask
         expected = self.current_mask
+        expected_labels = np.zeros_like(volume, dtype=np.uint8) if expected is None else resize_mask_to_shape(expected, volume.shape).astype(np.uint8)
+        output_labels = np.zeros_like(volume, dtype=np.uint8) if output is None else resize_mask_to_shape(output, volume.shape).astype(np.uint8)
+        empty_image = np.zeros_like(volume, dtype=np.float32)
+        empty_labels = np.zeros_like(volume, dtype=np.uint8)
         layer_data = [
             volume,
-            build_segmentation_overlay(volume, expected),
-            build_output_overlay(volume, output),
-            build_comparison_overlay(volume, expected, output),
-            np.zeros_like(volume, dtype=np.uint8) if expected is None else resize_mask_to_shape(expected, volume.shape).astype(np.uint8),
-            np.zeros_like(volume, dtype=np.uint8) if output is None else resize_mask_to_shape(output, volume.shape).astype(np.uint8),
+            empty_labels,
+            volume,
+            expected_labels,
+            volume,
+            output_labels,
+            empty_image,
+            expected_labels,
+            empty_image,
+            output_labels,
+            empty_image,
+            empty_labels,
         ]
         layer_names = [
             f"{scan_name} — input scan",
+            "",
             f"{scan_name} — input + EXPECTED",
+            "",
             f"{scan_name} — input + OUTPUT",
-            f"{scan_name} — EXPECTED + OUTPUT",
+            "",
             "EXPECTED segmentation",
+            "",
             "OUTPUT segmentation" if output is not None else "OUTPUT segmentation (generate to view)",
+            "",
+            "",
+            "",
         ]
         for index, (layer, data, name) in enumerate(zip(self.output_layers, layer_data, layer_names)):
             layer.data = data
             layer.name = name
-            if index == 0:
+            if index in (0, 2, 4):
                 layer.contrast_limits = contrast_limits(data)
 
     def on_checkpoint_changed(self, checkpoint_name: str) -> None:
@@ -528,7 +611,12 @@ class SubjectSelectorWidget(QWidget):
         if checkpoint is not None and self.current_subject_dir is not None:
             output_path = checkpoint_output_path(self.results_root, checkpoint, self.current_subject_dir)
             if output_path.exists():
-                self.current_output_mask = load_volume(output_path).astype(np.uint8)
+                output_mask = load_volume(output_path).astype(np.uint8)
+                flair_path = self.current_scan_index.get("FLAIR")
+                self.current_output_mask = (
+                    restrict_mask_to_scan_foreground(output_mask, load_volume(flair_path))
+                    if flair_path is not None else output_mask
+                )
         self.refresh_output_layers()
 
     def on_generate_output(self) -> None:
@@ -562,34 +650,53 @@ class SubjectSelectorWidget(QWidget):
     def on_scan_changed(self, scan_name: str) -> None:
         if scan_name not in self.current_scan_index:
             self.extra_layer.visible = False
+            self.extra_mask_layer.visible = False
             return
 
         selected_path = self.current_scan_index[scan_name]
         volume = load_volume(selected_path)
 
-        self.extra_layer.data = build_segmentation_overlay(volume, self.current_mask)
+        self.extra_layer.data = volume
+        self.extra_layer.contrast_limits = contrast_limits(volume)
         self.extra_layer.name = f"{scan_name} + EXPECTED"
+        self.extra_mask_layer.data = (
+            np.zeros_like(volume, dtype=np.uint8)
+            if self.current_mask is None
+            else resize_mask_to_shape(self.current_mask, volume.shape).astype(np.uint8)
+        )
         self.extra_layer.visible = True
+        self.extra_mask_layer.visible = True
         self.refresh_frequency_layers(scan_name, volume)
         self.refresh_output_layers()
         self.viewer.reset_view()
 
+    def on_frequency_band_changed(self, band: str) -> None:
+        """Refresh the high-frequency row when H1–H4 selection changes."""
+        if not band or not self.current_scan_index:
+            return
+        scan_name = self.extra_combo.currentText()
+        if scan_name in self.current_scan_index:
+            self.refresh_frequency_layers(scan_name, load_volume(self.current_scan_index[scan_name]))
+            if self.mode_combo.currentText() == "Frequency decomposition":
+                self.viewer.reset_view()
+
     def refresh_frequency_layers(self, scan_name: str, actual_volume: np.ndarray) -> None:
         scan_path = self.current_scan_index[scan_name]
         low_volume, low_available = load_frequency_volume(scan_path, "L", actual_volume)
-        high_volume, high_available = load_frequency_volume(scan_path, "H", actual_volume)
+        selected_band = self.frequency_band_combo.currentText() or "H1"
+        high_volume, high_available = load_frequency_volume(scan_path, selected_band, actual_volume)
         low_volume = suppress_background(low_volume, actual_volume)
         high_volume = suppress_background(high_volume, actual_volume)
 
         low_label = "low frequency" if low_available else "low frequency (not available)"
-        high_label = "high frequency" if high_available else "high frequency (not generated)"
+        high_label = f"{selected_band} high frequency" if high_available else f"{selected_band} high frequency (not generated)"
         layer_data = [
             actual_volume,
             low_volume,
-            build_segmentation_overlay(low_volume, self.current_mask),
+            low_volume,
             actual_volume,
             high_volume,
-            build_segmentation_overlay(high_volume, self.current_mask),
+            high_volume,
         ]
         layer_names = [
             f"{scan_name} — actual",
@@ -603,25 +710,39 @@ class SubjectSelectorWidget(QWidget):
             layer.data = data
             layer.name = name
 
-        for index in (0, 1, 3, 4):
+        for layer in self.frequency_mask_layers:
+            layer.data = (
+                np.zeros_like(actual_volume, dtype=np.uint8)
+                if self.current_mask is None
+                else resize_mask_to_shape(self.current_mask, actual_volume.shape).astype(np.uint8)
+            )
+
+        for index in range(6):
             self.frequency_layers[index].contrast_limits = contrast_limits(layer_data[index])
 
     def on_mode_changed(self, mode: str) -> None:
         frequency_mode = mode == "Frequency decomposition"
         output_mode = mode == "Output Analysis"
-        for layer in [*self.image_layers, self.extra_layer]:
+        self.set_checkpoint_controls_visible(output_mode)
+        self.set_frequency_band_controls_visible(frequency_mode)
+        for layer in [*self.image_layers, self.extra_layer, self.extra_mask_layer]:
             layer.visible = not frequency_mode and not output_mode
         if self.mask_layer is not None:
             self.mask_layer.visible = not frequency_mode and not output_mode
-        for layer in self.frequency_layers:
+        for layer in [*self.frequency_layers, *self.frequency_mask_layers]:
             layer.visible = frequency_mode
         for layer in self.output_layers:
             layer.visible = output_mode
         if output_mode:
+            self.viewer.grid.stride = 2
             self.refresh_checkpoint_options()
+        elif frequency_mode:
+            self.viewer.grid.stride = 2
+        else:
+            self.viewer.grid.stride = 2
         self.description.setText(
-            "Frequency decomposition: actual scan, low-frequency scan, low-frequency + expected, "
-            "then the corresponding high-frequency row."
+            f"Frequency decomposition: actual scan, low-frequency scan, low-frequency + expected, "
+            f"then the selected {self.frequency_band_combo.currentText() or 'H1'} high-frequency row."
             if frequency_mode
             else (
                 "Output Analysis: selected input scan, expected segmentation, and output segmentation. "
@@ -632,14 +753,12 @@ class SubjectSelectorWidget(QWidget):
         )
         self.viewer.reset_view()
 
-    def on_subject_changed(self, subject_name: str) -> None:
-        # QComboBox emits currentTextChanged for every character typed into
-        # the editable search field. Ignore partial/non-matching text until
-        # the user picks a real subject from the completer.
-        if subject_name not in self.subject_index:
+    def on_subject_changed(self, subject_dir: Path) -> None:
+        subject_dir = subject_dir.expanduser().resolve()
+        if subject_files(subject_dir)[1] is None:
             return
 
-        subject_dir = self.subject_index[subject_name]
+        self.selected_record.setText(f"Selected: {subject_dir}")
         volumes, mask = load_subject(subject_dir)
         scan_paths, _ = subject_files(subject_dir)
         scan_names = list(volumes.keys())
@@ -665,6 +784,13 @@ class SubjectSelectorWidget(QWidget):
                 self.mask_layer.data = mask.astype(np.uint8)
                 self.mask_layer.visible = True
 
+        target_shape = volumes[scan_names[0]].shape
+        self.extra_mask_layer.data = (
+            np.zeros(target_shape, dtype=np.uint8)
+            if mask is None
+            else resize_mask_to_shape(mask, target_shape).astype(np.uint8)
+        )
+
         self.refresh_scan_options()
         self.on_mode_changed(self.mode_combo.currentText())
         self.viewer.title = f"BraTS viewer — {subject_dir.name}"
@@ -679,10 +805,10 @@ def add_subject_layers(
 ) -> None:
     viewer.layers.clear()
 
-    subject_index = {subject.relative_to(dataset_root).as_posix(): subject for subject in discover_subject_dirs(dataset_root)}
     volumes, mask = load_subject(initial_subject)
 
     image_layers: list[napari.layers.Image] = []
+    input_grid_padding_layers: list[napari.layers.Image] = []
     for scan_name, volume in volumes.items():
         image_layers.append(
             viewer.add_image(
@@ -695,102 +821,42 @@ def add_subject_layers(
                 blending="translucent",
             )
         )
+        # Input Analysis uses grid stride 2 so a scan and its optional overlay
+        # can share a cell. Keep one hidden partner after each scan tile.
+        input_grid_padding_layers.append(
+            viewer.add_image(
+                np.zeros_like(volume, dtype=np.float32),
+                name="input grid padding",
+                visible=False,
+                rendering="mip",
+            )
+        )
 
     initial_scan_name = next(reversed(volumes))
     extra_layer = viewer.add_image(
-        build_segmentation_overlay(volumes[initial_scan_name], mask),
+        volumes[initial_scan_name],
         name=f"{initial_scan_name} + EXPECTED",
-        rgb=True,
+        contrast_limits=contrast_limits(volumes[initial_scan_name]),
         rendering="mip",
-        blending="translucent",
+    )
+    extra_mask_layer = viewer.add_labels(
+        np.zeros_like(volumes[initial_scan_name], dtype=np.uint8)
+        if mask is None
+        else mask.astype(np.uint8),
+        name="",
+        colormap=BRATS_LABEL_COLORMAP,
+        rendering="iso_categorical",
+        opacity=0.65,
+        visible=True,
     )
 
-    initial_scan_path = next(path for path in subject_files(initial_subject)[0] if strip_nifti_suffix(path).rsplit("_", 1)[-1].upper() == initial_scan_name)
-    initial_low, initial_low_available = load_frequency_volume(
-        initial_scan_path,
-        "L",
-        volumes[initial_scan_name],
+    # Keep the standalone expected mask at the sixth Input Analysis tile.
+    mask_grid_padding = viewer.add_image(
+        np.zeros_like(volumes[initial_scan_name], dtype=np.float32),
+        name="input grid padding",
+        visible=False,
+        rendering="mip",
     )
-    initial_high, initial_high_available = load_frequency_volume(
-        initial_scan_path,
-        "H",
-        volumes[initial_scan_name],
-    )
-    initial_low_label = "low frequency" if initial_low_available else "low frequency (not available)"
-    initial_high_label = "high frequency" if initial_high_available else "high frequency (not generated)"
-    frequency_layers = [
-        viewer.add_image(volumes[initial_scan_name], name=f"{initial_scan_name} — actual", visible=False, rendering="mip"),
-        viewer.add_image(initial_low, name=f"{initial_scan_name} — {initial_low_label}", visible=False, rendering="mip"),
-        viewer.add_image(
-            build_segmentation_overlay(initial_low, mask),
-            name=f"{initial_scan_name} — {initial_low_label} + EXPECTED",
-            rgb=True,
-            visible=False,
-            rendering="mip",
-        ),
-        viewer.add_image(
-            volumes[initial_scan_name],
-            name=f"{initial_scan_name} — actual (high row)",
-            visible=False,
-            rendering="mip",
-        ),
-        viewer.add_image(initial_high, name=f"{initial_scan_name} — {initial_high_label}", visible=False, rendering="mip"),
-        viewer.add_image(
-            build_segmentation_overlay(initial_high, mask),
-            name=f"{initial_scan_name} — {initial_high_label} + EXPECTED",
-            rgb=True,
-            visible=False,
-            rendering="mip",
-        ),
-    ]
-
-    # Output Analysis keeps six linked tiles: the requested input, input +
-    # expected, and input + generated output views, plus three mask-focused
-    # comparison tiles. All are populated when a record and input scan change.
-    output_layers = [
-        viewer.add_image(
-            volumes[initial_scan_name],
-            name=f"{initial_scan_name} — input scan",
-            visible=False,
-            rendering="mip",
-        ),
-        viewer.add_image(
-            build_segmentation_overlay(volumes[initial_scan_name], mask),
-            name=f"{initial_scan_name} — input + EXPECTED",
-            rgb=True,
-            visible=False,
-            rendering="mip",
-        ),
-        viewer.add_image(
-            build_output_overlay(volumes[initial_scan_name], None),
-            name=f"{initial_scan_name} — input + OUTPUT",
-            rgb=True,
-            visible=False,
-            rendering="mip",
-        ),
-        viewer.add_image(
-            build_comparison_overlay(volumes[initial_scan_name], mask, None),
-            name=f"{initial_scan_name} — EXPECTED + OUTPUT",
-            rgb=True,
-            visible=False,
-            rendering="mip",
-        ),
-        viewer.add_labels(
-            np.zeros_like(volumes[initial_scan_name], dtype=np.uint8) if mask is None else mask.astype(np.uint8),
-            name="EXPECTED segmentation",
-            colormap=BRATS_LABEL_COLORMAP,
-            visible=False,
-            rendering="iso_categorical",
-        ),
-        viewer.add_labels(
-            np.zeros_like(volumes[initial_scan_name], dtype=np.uint8),
-            name="OUTPUT segmentation (generate to view)",
-            colormap=BRATS_LABEL_COLORMAP,
-            visible=False,
-            rendering="iso_categorical",
-        ),
-    ]
-
     mask_layer = None
     if mask is not None:
         mask_layer = viewer.add_labels(
@@ -802,18 +868,159 @@ def add_subject_layers(
             blending="translucent",
         )
 
-    enable_grid_layer_labels(
-        [*image_layers, extra_layer, *frequency_layers, *output_layers] + ([mask_layer] if mask_layer is not None else [])
+    initial_scan_path = next(path for path in subject_files(initial_subject)[0] if strip_nifti_suffix(path).rsplit("_", 1)[-1].upper() == initial_scan_name)
+    initial_low, initial_low_available = load_frequency_volume(
+        initial_scan_path,
+        "L",
+        volumes[initial_scan_name],
     )
+    initial_high, initial_high_available = load_frequency_volume(
+        initial_scan_path,
+        "H1",
+        volumes[initial_scan_name],
+    )
+    initial_low_label = "low frequency" if initial_low_available else "low frequency (not available)"
+    initial_high_label = "H1 high frequency" if initial_high_available else "H1 high frequency (not generated)"
+    frequency_layers: list[napari.layers.Image] = []
+    frequency_mask_layers: list[napari.layers.Labels] = []
+
+    def add_frequency_image(data: np.ndarray, name: str) -> napari.layers.Image:
+        layer = viewer.add_image(data, name=name, visible=False, rendering="mip")
+        frequency_layers.append(layer)
+        return layer
+
+    def add_frequency_padding(data: np.ndarray) -> None:
+        viewer.add_image(
+            np.zeros_like(data, dtype=np.float32),
+            name="frequency grid padding",
+            visible=False,
+            rendering="mip",
+        )
+
+    add_frequency_image(volumes[initial_scan_name], f"{initial_scan_name} — actual")
+    add_frequency_padding(volumes[initial_scan_name])
+    add_frequency_image(initial_low, f"{initial_scan_name} — {initial_low_label}")
+    add_frequency_padding(initial_low)
+    add_frequency_image(initial_low, f"{initial_scan_name} — {initial_low_label} + EXPECTED")
+    frequency_mask_layers.append(
+        viewer.add_labels(
+            np.zeros_like(initial_low, dtype=np.uint8) if mask is None else mask.astype(np.uint8),
+            name="",
+            colormap=BRATS_LABEL_COLORMAP,
+            opacity=0.65,
+            visible=False,
+            rendering="iso_categorical",
+        )
+    )
+    add_frequency_image(volumes[initial_scan_name], f"{initial_scan_name} — actual (high row)")
+    add_frequency_padding(volumes[initial_scan_name])
+    add_frequency_image(initial_high, f"{initial_scan_name} — {initial_high_label}")
+    add_frequency_padding(initial_high)
+    add_frequency_image(initial_high, f"{initial_scan_name} — {initial_high_label} + EXPECTED")
+    frequency_mask_layers.append(
+        viewer.add_labels(
+            np.zeros_like(initial_high, dtype=np.uint8) if mask is None else mask.astype(np.uint8),
+            name="",
+            colormap=BRATS_LABEL_COLORMAP,
+            opacity=0.65,
+            visible=False,
+            rendering="iso_categorical",
+        )
+    )
+
+    # Output Analysis uses paired layers with grid stride 2. Each tile gets an
+    # MRI/base image followed by a categorical Labels layer, so the combined
+    # panels contain the exact same segmentation blob as the standalone masks.
+    initial_empty_mask = np.zeros_like(volumes[initial_scan_name], dtype=np.uint8)
+    viewer.add_image(
+        initial_empty_mask.astype(np.float32),
+        name="output grid padding",
+        visible=False,
+        rendering="mip",
+    )
+    viewer.add_image(
+        initial_empty_mask.astype(np.float32),
+        name="output grid padding",
+        visible=False,
+        rendering="mip",
+    )
+    output_layers = [
+        viewer.add_image(
+            volumes[initial_scan_name],
+            name=f"{initial_scan_name} — input scan",
+            visible=False,
+            rendering="mip",
+        ),
+        viewer.add_labels(initial_empty_mask, name="", colormap=BRATS_LABEL_COLORMAP, visible=False, rendering="iso_categorical"),
+        viewer.add_image(
+            volumes[initial_scan_name],
+            name=f"{initial_scan_name} — input + EXPECTED",
+            visible=False,
+            rendering="mip",
+        ),
+        viewer.add_labels(
+            initial_empty_mask if mask is None else mask.astype(np.uint8),
+            name="",
+            colormap=BRATS_LABEL_COLORMAP,
+            opacity=0.65,
+            visible=False,
+            rendering="iso_categorical",
+        ),
+        viewer.add_image(
+            volumes[initial_scan_name],
+            name=f"{initial_scan_name} — input + OUTPUT",
+            visible=False,
+            rendering="mip",
+        ),
+        viewer.add_labels(initial_empty_mask, name="", colormap=BRATS_LABEL_COLORMAP, opacity=0.65, visible=False, rendering="iso_categorical"),
+        viewer.add_image(initial_empty_mask.astype(np.float32), name="EXPECTED segmentation", visible=False, rendering="mip"),
+        viewer.add_labels(
+            initial_empty_mask if mask is None else mask.astype(np.uint8),
+            name="",
+            colormap=BRATS_LABEL_COLORMAP,
+            visible=False,
+            rendering="iso_categorical",
+        ),
+        viewer.add_image(initial_empty_mask.astype(np.float32), name="OUTPUT segmentation", visible=False, rendering="mip"),
+        viewer.add_labels(
+            initial_empty_mask,
+            name="",
+            colormap=BRATS_LABEL_COLORMAP,
+            visible=False,
+            rendering="iso_categorical",
+        ),
+        viewer.add_image(initial_empty_mask.astype(np.float32), name="", visible=False, rendering="mip"),
+        viewer.add_labels(initial_empty_mask, name="", colormap=BRATS_LABEL_COLORMAP, visible=False, rendering="iso_categorical"),
+    ]
+
+    enable_grid_layer_labels(
+        [
+            *image_layers,
+            extra_layer,
+            extra_mask_layer,
+            *frequency_layers,
+            *frequency_mask_layers,
+            *output_layers,
+            *input_grid_padding_layers,
+            mask_grid_padding,
+        ]
+        + ([mask_layer] if mask_layer is not None else [])
+    )
+    # In Output Analysis, each grid cell has an image and a Labels layer.
+    # Only the image/base layer should contribute a tile title.
+    for layer in output_layers[1::2]:
+        layer.name_overlay.visible = False
 
     selector = SubjectSelectorWidget(
         viewer,
         dataset_root,
-        subject_index,
+        initial_subject,
         image_layers,
         extra_layer,
+        extra_mask_layer,
         mask_layer,
         frequency_layers,
+        frequency_mask_layers,
         output_layers,
         results_root,
     )
@@ -824,11 +1031,19 @@ def add_subject_layers(
         allowed_areas=["left", "right"],
     )
 
+    # Keep the layer list available, but hide Napari's per-layer controls so
+    # the left sidebar only contains the layers list and subject selector.
+    # ``dockLayerControls`` is separate from ``dockLayerList`` in Napari's Qt
+    # viewer, so hiding it does not affect layer visibility or selection.
+    layer_controls_dock = viewer.window._qt_viewer.dockLayerControls
+    layer_controls_dock.setVisible(False)
+    layer_controls_dock.toggleViewAction().setVisible(False)
+
     # Both view modes deliberately use the same 2×3 arrangement:
     # input-analysis layers or frequency-decomposition layers fill the grid
     # in their declared order.
     viewer.grid.shape = (2, 3)
-    viewer.grid.stride = 1
+    viewer.grid.stride = 2
     viewer.grid.enabled = True
     viewer.dims.ndisplay = 3
     viewer.dims.order = (0, 1, 2)
@@ -855,20 +1070,30 @@ def main() -> None:
     args = parse_args()
     dataset_root = args.dataset_root.expanduser().resolve()
     results_root = args.results_root.expanduser().resolve()
-    subjects = discover_subject_dirs(dataset_root)
-    if not subjects:
-        raise SystemExit(f"No BraTS subjects found under {dataset_root}")
+    viewer = napari.Viewer(ndisplay=3, title="BraTS Napari viewer")
 
     if args.subject:
-        requested = Path(args.subject)
-        matching_subjects = [path for path in subjects if path.name == args.subject or path.relative_to(dataset_root) == requested]
-        if not matching_subjects:
-            raise SystemExit(f"Subject not found: {args.subject}")
-        initial_subject = matching_subjects[0]
+        requested = Path(args.subject).expanduser()
+        initial_subject = requested if requested.is_absolute() else dataset_root / requested
     else:
-        initial_subject = subjects[0]
+        selected = QFileDialog.getExistingDirectory(
+            None,
+            "Select BraTS record folder",
+            str(dataset_root),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not selected:
+            viewer.close()
+            raise SystemExit("No BraTS record selected.")
+        initial_subject = Path(selected).expanduser().resolve()
 
-    viewer = napari.Viewer(ndisplay=3, title="BraTS Napari viewer")
+    if not initial_subject.is_dir() or subject_files(initial_subject)[1] is None:
+        viewer.close()
+        raise SystemExit(
+            f"Not a BraTS record folder: {initial_subject}. "
+            "Expected a folder containing _seg.nii or _seg.nii.gz."
+        )
+
     add_subject_layers(viewer, dataset_root, initial_subject, results_root)
     napari.run()
 
