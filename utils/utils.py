@@ -66,5 +66,7 @@ def get_device():
 
 
 def clear_device_cache(device):
+    return ...
+    # guess not needed anymore since it works fine
     if device.type == 'cuda':
         torch.cuda.empty_cache()

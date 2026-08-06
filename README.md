@@ -175,7 +175,8 @@ This process may take some time, so feel free to take a break while it runs. ☕
 
 Use `cross_train.py` to train five independent models. It discovers every
 patient directory beneath the supplied dataset root, creates deterministic
-patient-level folds, and runs `train.py` sequentially once per held-out fold.
+patient-level folds, and runs `train.py` once per held-out fold. By default,
+folds run sequentially; this is the only supported cross-validation mode.
 The generated split lists, fold checkpoints, per-fold `training_metrics.json`,
 and aggregate `cross_validation_metrics.json` are saved in a new, immutable
 experiment subdirectory under the results directory. The directory defaults to
@@ -184,10 +185,43 @@ The run manifest records the split, forwarded training arguments, and the
 status of every fold. Use `--run-name` when you want a readable experiment
 name; reusing a name is rejected rather than overwriting the prior experiment.
 
+Each training process also records process-scoped resource usage. The monitor
+follows `train.py` and its DataLoader descendants, so unrelated processes
+sharing the same GPU are excluded. CUDA runs use NVIDIA NVML and MPS runs use
+PyTorch's MPS counters; RAM is collected with `psutil`. Each fold writes
+`nvidia_resource_usage.jsonl` or `mps_resource_usage.jsonl`, together with a
+matching `*_resource_summary.json`, inside its checkpoint directory. Change the
+sampling interval for every fold with `--resource-monitor-interval 2` on
+`cross_train.py`, or with the same option on a direct `train.py` run. The
+cross-validation manifest records the summary file produced by each fold. New
+runs also record tracked-tree CPU utilization and epoch diagnostics such as
+learning rate, gradient norm, samples per second, data wait time, epoch
+duration, and non-finite batch counts. NVIDIA runs also record process-scoped
+GPU utilization when the installed NVML binding exposes that query; MPS and
+older NVML environments show it as unavailable rather than mixing in other
+processes.
+
+The web viewer also includes a `Training monitor` view. It discovers the
+per-fold JSONL logs below the configured results root, refreshes active folds
+every five seconds, and keeps completed or stale folds selectable for history.
+The viewer reports process-scoped RAM and accelerator values; it does not
+aggregate unrelated processes sharing the same device.
+Use `Open resource drilldown` for separate, independently scaled timelines for
+RAM RSS, RAM USS, VRAM, tracked-tree CPU utilization, and process-scoped NVIDIA
+GPU utilization; the compact metric cards remain available for a quick
+current/peak view. The epoch drilldown adds loss, learning-rate, gradient,
+throughput, data-wait, and duration graphs when those fields are present in the
+run's `training_metrics.json`.
+Each fold also shows completed, total, and pending epochs. Select a fold to see
+its progress bar; use `Open drilldown` to inspect the recorded epoch loss
+curves and the latest validation metrics. Epoch progress advances after each
+validation result is persisted to `training_metrics.json`.
+
 ```bash
 python cross_train.py \
   dataset/brats2019/extracted/MICCAI_BraTS_2019_Data_Training \
   --epochs 350 \
+  --resource-monitor-interval 5 \
   --results-dir result/cross_validation \
   --run-name brats19_et_seed42_baseline \
   -- --dataset_name brats19 --class_type et --batch_size 1
@@ -231,31 +265,54 @@ second `--` are forwarded by `cross_train.py` to `train.py`. Select a single
 physical GPU or MIG UUID with `HFF_GPU_DEVICE` or `--gpu-device`. Inside the
 job, the selected device is visible to PyTorch as `cuda:0`.
 
+Validation reduces each branch prediction to class labels immediately and
+computes the existing groupwise Dice/HD95 metrics in bounded CPU buffers. The
+training and inference entrypoints default to three DataLoader workers through
+`--num_workers`; override this only after checking host-RAM usage. The GPU PBS
+wrapper requests one GPU with 12 CPU cores and 64 GB of host memory.
+
 The low-frequency and MATLAB high-frequency jobs use `cpuq` with 16 CPU cores. Submit high-frequency work with `submit_high_freq_cpu.pbs`; `submit_high_freq_gpu.pbs` remains as a compatibility alias. The high-frequency MATLAB code uses CPU `parfor` subject-level parallelism; it does not call `gpuArray`, `gpuDevice`, or another GPU API. Only the training job uses `workq` and requires `CUDA_VISIBLE_DEVICES`. Conda is required for the low-frequency and training wrappers, but not for the MATLAB high-frequency wrapper. All wrappers accept command-line paths; environment variables `HFF_INPUT_PATH`, `HFF_TRAIN_LIST`, and `HFF_VAL_LIST` remain available as defaults.
 
 To monitor jobs, list your queued and running jobs with `qstat -u "$USER"`, inspect one job with `qstat -f JOB_ID`, and cancel it with `qdel JOB_ID`. The job ID is printed by `qsub` after submission. Since the wrappers use `#PBS -j oe`, standard output and error are combined; their location is shown by the `Output_Path` and `Error_Path` fields in `qstat -f JOB_ID`.
 
-## 🖥️ Scan Viewer
+## 🖥️ Browser scan viewer
 
-To inspect any BraTS subject interactively, run the local viewer:
+The repository uses a Niivue + React web viewer. It preserves the
+four-modality input view, segmentation overlays, frequency decomposition,
+checkpoint-driven output analysis, 2D multiplanar slice navigation, and 3D
+volume rendering without requiring a desktop Qt application. Niivue loads
+NIfTI responses directly in the browser, while preprocessing and output
+generation remain in Python.
 
-```bash
-streamlit run viewer_app.py
-```
-
-The viewer scans the dataset folder, lets you pick a subject and any NIfTI volumes in that folder, shows them side by side, overlays the segmentation mask when present, and renders the foreground segmentation as a 3D surface.
-
-For a native, high-fidelity volume viewer, use Napari:
-
-```bash
-python napari_viewer.py --dataset-root your_data_path/MICCAI_BraTS_2019_Data_Training
-```
-
-Napari opens the four MRI scans and expected mask as linked tiles in a 2×3 grid. Use the layer list to toggle scans, the dimension sliders to move through the volume, and the 2D/3D controls to change the rendering mode. Select a specific subject with `--subject`, for example:
+Start both the Python API and React development server from `web_viewer`:
 
 ```bash
-python napari_viewer.py --dataset-root your_data_path/MICCAI_BraTS_2019_Data_Training --subject HGG/BraTS19_2013_10_1
+cd web_viewer
+npm run start
 ```
+
+The launcher uses the repository defaults (`dataset` and `result`) and starts
+FastAPI on port 8010 and Vite on port 5173. If you prefer separate terminals,
+the original commands remain supported:
+
+```bash
+python web_viewer_api.py
+
+# in a second terminal
+cd web_viewer
+npm install
+npm run dev
+```
+
+Open <http://localhost:5173>. The API listens on port 8010 and serves the
+source and derived scans as compressed NIfTI volumes for Niivue.
+
+After startup, use the folder browser to choose a scan folder. It opens at the
+configured dataset root and lazily lists nested directories such as
+`splits/base` and `splits/explore`; files are not scanned until a folder is
+selected. To browse multiple top-level storage locations, pass their common
+parent as `--dataset-root`; the browser never exposes arbitrary server
+filesystem paths.
 
 ---
 After running frequency decomposition, each subject folder is expected to have the following structure:

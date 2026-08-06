@@ -26,13 +26,18 @@ function formatTime(value) {
   return Number.isNaN(date.getTime()) ? "Unknown time" : date.toLocaleString([], { dateStyle: "medium", timeStyle: "medium" });
 }
 
-function formatRunStart(run) {
-  return run.started_at ? formatTime(run.started_at) : "Timing unavailable";
-}
-
-function formatRunCompletion(run) {
-  if (run.completed_at) return `Completed ${formatTime(run.completed_at)}`;
-  return run.status === "completed" ? "Completed · timing unavailable" : "Still running";
+function formatRelativeTime(value) {
+  if (!value) return "Timing unavailable";
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return "Timing unavailable";
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (elapsedSeconds < 60) return "just now";
+  const minutes = Math.floor(elapsedSeconds / 60);
+  if (minutes < 60) return `${minutes} min${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 function StatusBadge({ status }) {
@@ -274,14 +279,12 @@ function RunCard({ run, selected, onClick }) {
       <div className="monitor-run-card-meta">
         <span>{String(run.backend).toUpperCase()}</span>
         <span>{run.sample_count} samples</span>
-        <span>Started {formatRunStart(run)}</span>
       </div>
       <div className="monitor-run-card-values">
         <span>RAM <strong>{formatBytes(latest.ram_rss_bytes)}</strong></span>
         <span>VRAM <strong>{formatBytes(latest.gpu_memory_bytes)}</strong></span>
       </div>
       <div className="monitor-run-card-epochs"><span>Epochs <strong>{training.completed_epochs ?? 0} / {training.total_epochs ?? "—"}</strong></span><span>{training.pending_epochs ?? "—"} pending</span></div>
-      <div className="monitor-run-card-completed">{formatRunCompletion(run)}</div>
     </button>
   );
 }
@@ -304,13 +307,9 @@ function RunGroup({ group, expanded, selectedId, onToggle, onSelect }) {
         onClick={() => onToggle(group.key)}
       >
         <span className="monitor-run-group-chevron" aria-hidden="true">{expanded ? "⌄" : "›"}</span>
-        <div><strong>{group.label}</strong><span>{group.runs.length} fold{group.runs.length === 1 ? "" : "s"}</span></div>
+        <div><strong>{group.label}</strong></div>
         <StatusBadge status={status} />
       </button>
-      <div className="monitor-run-group-times">
-        <span>Started {group.startedAt ? formatTime(group.startedAt) : "Timing unavailable"}</span>
-        <span>{group.completedAt ? `Completed ${formatTime(group.completedAt)}` : status === "completed" ? "Completed · timing unavailable" : "In progress"}</span>
-      </div>
       {expanded && <div className="monitor-run-group-folds">{group.runs.map((run) => <RunCard key={run.id} run={run} selected={run.id === selectedId} onClick={() => onSelect(run.id)} />)}</div>}
     </section>
   );
@@ -472,7 +471,11 @@ export default function MonitorView() {
                   <div className="monitor-detail-eyebrow">{detail.run_name} / {detail.fold}</div>
                   <h2>{detail.label}</h2>
                 </div>
-                <div className="monitor-detail-status"><StatusBadge status={detail.status} /><span>Updated {formatTime(detail.updated_at)}</span></div>
+                <div className="monitor-detail-status">
+                  <StatusBadge status={detail.status} />
+                  <span>Started {formatRelativeTime(detail.started_at)}</span>
+                  <span>Updated {formatTime(detail.updated_at)}</span>
+                </div>
               </header>
 
               <div className="monitor-metrics-grid">
