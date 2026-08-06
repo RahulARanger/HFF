@@ -26,6 +26,15 @@ function formatTime(value) {
   return Number.isNaN(date.getTime()) ? "Unknown time" : date.toLocaleString([], { dateStyle: "medium", timeStyle: "medium" });
 }
 
+function formatRunStart(run) {
+  return run.started_at ? formatTime(run.started_at) : "Timing unavailable";
+}
+
+function formatRunCompletion(run) {
+  if (run.completed_at) return `Completed ${formatTime(run.completed_at)}`;
+  return run.status === "completed" ? "Completed · timing unavailable" : "Still running";
+}
+
 function StatusBadge({ status }) {
   return <span className={`monitor-status ${status}`}><span className="monitor-status-dot" />{status}</span>;
 }
@@ -265,14 +274,14 @@ function RunCard({ run, selected, onClick }) {
       <div className="monitor-run-card-meta">
         <span>{String(run.backend).toUpperCase()}</span>
         <span>{run.sample_count} samples</span>
-        <span>Started {formatTime(run.started_at)}</span>
+        <span>Started {formatRunStart(run)}</span>
       </div>
       <div className="monitor-run-card-values">
         <span>RAM <strong>{formatBytes(latest.ram_rss_bytes)}</strong></span>
         <span>VRAM <strong>{formatBytes(latest.gpu_memory_bytes)}</strong></span>
       </div>
       <div className="monitor-run-card-epochs"><span>Epochs <strong>{training.completed_epochs ?? 0} / {training.total_epochs ?? "—"}</strong></span><span>{training.pending_epochs ?? "—"} pending</span></div>
-      <div className="monitor-run-card-completed">{run.completed_at ? `Completed ${formatTime(run.completed_at)}` : "Still running"}</div>
+      <div className="monitor-run-card-completed">{formatRunCompletion(run)}</div>
     </button>
   );
 }
@@ -284,19 +293,25 @@ function groupStatus(runs) {
   return "completed";
 }
 
-function RunGroup({ group, selectedId, onSelect }) {
+function RunGroup({ group, expanded, selectedId, onToggle, onSelect }) {
   const status = groupStatus(group.runs);
   return (
     <section className="monitor-run-group">
-      <div className="monitor-run-group-heading">
+      <button
+        className={`monitor-run-group-heading ${expanded ? "expanded" : ""}`}
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => onToggle(group.key)}
+      >
+        <span className="monitor-run-group-chevron" aria-hidden="true">{expanded ? "⌄" : "›"}</span>
         <div><strong>{group.label}</strong><span>{group.runs.length} fold{group.runs.length === 1 ? "" : "s"}</span></div>
         <StatusBadge status={status} />
-      </div>
+      </button>
       <div className="monitor-run-group-times">
-        <span>Started {formatTime(group.startedAt)}</span>
-        <span>{group.completedAt ? `Completed ${formatTime(group.completedAt)}` : "In progress"}</span>
+        <span>Started {group.startedAt ? formatTime(group.startedAt) : "Timing unavailable"}</span>
+        <span>{group.completedAt ? `Completed ${formatTime(group.completedAt)}` : status === "completed" ? "Completed · timing unavailable" : "In progress"}</span>
       </div>
-      {group.runs.map((run) => <RunCard key={run.id} run={run} selected={run.id === selectedId} onClick={() => onSelect(run.id)} />)}
+      {expanded && <div className="monitor-run-group-folds">{group.runs.map((run) => <RunCard key={run.id} run={run} selected={run.id === selectedId} onClick={() => onSelect(run.id)} />)}</div>}
     </section>
   );
 }
@@ -309,6 +324,7 @@ export default function MonitorView() {
   const [refreshing, setRefreshing] = useState(false);
   const [showResourceDetail, setShowResourceDetail] = useState(false);
   const [showEpochDetail, setShowEpochDetail] = useState(false);
+  const [expandedGroups, setExpandedGroups] = useState(() => new Set());
   const groups = useMemo(() => {
     const grouped = new Map();
     runs.forEach((run) => {
@@ -327,6 +343,25 @@ export default function MonitorView() {
     });
     return [...grouped.values()].sort((left, right) => new Date(right.startedAt || 0) - new Date(left.startedAt || 0));
   }, [runs]);
+
+  useEffect(() => {
+    if (!groups.length) return;
+    setExpandedGroups((current) => {
+      const available = new Set(groups.map((group) => group.key));
+      const next = new Set([...current].filter((key) => available.has(key)));
+      if (!next.size) next.add(groups[0].key);
+      return next;
+    });
+  }, [groups]);
+
+  const toggleGroup = useCallback((groupKey) => {
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
+      return next;
+    });
+  }, []);
 
   const refreshRuns = useCallback(async () => {
     const payload = await fetchMonitorRuns();
@@ -426,7 +461,7 @@ export default function MonitorView() {
       <div className="monitor-layout">
         <aside className="monitor-run-list">
           <div className="monitor-panel-heading"><span>Training runs</span><span>{groups.length} groups · {runs.length} folds</span></div>
-          {groups.length ? groups.map((group) => <RunGroup key={group.key} group={group} selectedId={selectedId} onSelect={setSelectedId} />) : <div className="monitor-empty"><strong>No monitor logs found</strong><span>Start cross_train or train.py to populate this view.</span></div>}
+          {groups.length ? groups.map((group) => <RunGroup key={group.key} group={group} expanded={expandedGroups.has(group.key)} selectedId={selectedId} onToggle={toggleGroup} onSelect={setSelectedId} />) : <div className="monitor-empty"><strong>No monitor logs found</strong><span>Start cross_train or train.py to populate this view.</span></div>}
         </aside>
 
         <section className="monitor-detail-panel">
@@ -467,8 +502,8 @@ export default function MonitorView() {
                     <div><dt>Root PID</dt><dd>{detail.root_pid || "—"}{detail.process_visible ? " · visible" : ""}</dd></div>
                     <div><dt>Tracked processes</dt><dd>{latest.tracked_pids?.length ?? "—"}</dd></div>
                     <div><dt>Interval</dt><dd>{detail.interval_seconds}s</dd></div>
-                    <div><dt>Training started</dt><dd>{formatTime(detail.started_at)}</dd></div>
-                    <div><dt>Training completed</dt><dd>{formatTime(detail.completed_at)}</dd></div>
+                    <div><dt>Training started</dt><dd>{detail.started_at ? formatTime(detail.started_at) : "Timing unavailable"}</dd></div>
+                    <div><dt>Training completed</dt><dd>{detail.completed_at ? formatTime(detail.completed_at) : detail.status === "completed" ? "Timing unavailable" : "Still running"}</dd></div>
                     <div><dt>Last sample</dt><dd>{formatTime(latest.timestamp_utc)}</dd></div>
                     <div><dt>Log file</dt><dd className="monitor-path" title={detail.resource_log}>{detail.resource_log}</dd></div>
                   </dl>
