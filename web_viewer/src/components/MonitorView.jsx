@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { fetchMonitorRun, fetchMonitorRuns } from "../api.js";
 
@@ -259,20 +259,45 @@ function RunCard({ run, selected, onClick }) {
   return (
     <button className={`monitor-run-card ${selected ? "selected" : ""}`} onClick={onClick}>
       <div className="monitor-run-card-topline">
-        <span className="monitor-run-label">{run.label}</span>
+        <span className="monitor-run-label">{run.fold}</span>
         <StatusBadge status={run.status} />
       </div>
       <div className="monitor-run-card-meta">
         <span>{String(run.backend).toUpperCase()}</span>
         <span>{run.sample_count} samples</span>
-        <span>{formatTime(run.updated_at)}</span>
+        <span>Started {formatTime(run.started_at)}</span>
       </div>
       <div className="monitor-run-card-values">
         <span>RAM <strong>{formatBytes(latest.ram_rss_bytes)}</strong></span>
         <span>VRAM <strong>{formatBytes(latest.gpu_memory_bytes)}</strong></span>
       </div>
       <div className="monitor-run-card-epochs"><span>Epochs <strong>{training.completed_epochs ?? 0} / {training.total_epochs ?? "—"}</strong></span><span>{training.pending_epochs ?? "—"} pending</span></div>
+      <div className="monitor-run-card-completed">{run.completed_at ? `Completed ${formatTime(run.completed_at)}` : "Still running"}</div>
     </button>
+  );
+}
+
+function groupStatus(runs) {
+  if (runs.some((run) => run.status === "running")) return "running";
+  if (runs.some((run) => run.status === "failed")) return "failed";
+  if (runs.some((run) => run.status === "stale")) return "stale";
+  return "completed";
+}
+
+function RunGroup({ group, selectedId, onSelect }) {
+  const status = groupStatus(group.runs);
+  return (
+    <section className="monitor-run-group">
+      <div className="monitor-run-group-heading">
+        <div><strong>{group.label}</strong><span>{group.runs.length} fold{group.runs.length === 1 ? "" : "s"}</span></div>
+        <StatusBadge status={status} />
+      </div>
+      <div className="monitor-run-group-times">
+        <span>Started {formatTime(group.startedAt)}</span>
+        <span>{group.completedAt ? `Completed ${formatTime(group.completedAt)}` : "In progress"}</span>
+      </div>
+      {group.runs.map((run) => <RunCard key={run.id} run={run} selected={run.id === selectedId} onClick={() => onSelect(run.id)} />)}
+    </section>
   );
 }
 
@@ -284,6 +309,24 @@ export default function MonitorView() {
   const [refreshing, setRefreshing] = useState(false);
   const [showResourceDetail, setShowResourceDetail] = useState(false);
   const [showEpochDetail, setShowEpochDetail] = useState(false);
+  const groups = useMemo(() => {
+    const grouped = new Map();
+    runs.forEach((run) => {
+      const key = run.group_id || run.run_name || run.id;
+      const group = grouped.get(key) || {
+        key,
+        label: run.group_label || run.run_name || "Standalone run",
+        startedAt: run.group_started_at || run.started_at,
+        completedAt: run.group_completed_at,
+        runs: [],
+      };
+      group.runs.push(run);
+      group.startedAt = group.startedAt || run.started_at;
+      group.completedAt = group.completedAt || run.group_completed_at;
+      grouped.set(key, group);
+    });
+    return [...grouped.values()].sort((left, right) => new Date(right.startedAt || 0) - new Date(left.startedAt || 0));
+  }, [runs]);
 
   const refreshRuns = useCallback(async () => {
     const payload = await fetchMonitorRuns();
@@ -382,8 +425,8 @@ export default function MonitorView() {
 
       <div className="monitor-layout">
         <aside className="monitor-run-list">
-          <div className="monitor-panel-heading"><span>Runs</span><span>{runs.length}</span></div>
-          {runs.length ? runs.map((run) => <RunCard key={run.id} run={run} selected={run.id === selectedId} onClick={() => setSelectedId(run.id)} />) : <div className="monitor-empty"><strong>No monitor logs found</strong><span>Start cross_train or train.py to populate this view.</span></div>}
+          <div className="monitor-panel-heading"><span>Training runs</span><span>{groups.length} groups · {runs.length} folds</span></div>
+          {groups.length ? groups.map((group) => <RunGroup key={group.key} group={group} selectedId={selectedId} onSelect={setSelectedId} />) : <div className="monitor-empty"><strong>No monitor logs found</strong><span>Start cross_train or train.py to populate this view.</span></div>}
         </aside>
 
         <section className="monitor-detail-panel">
@@ -424,6 +467,8 @@ export default function MonitorView() {
                     <div><dt>Root PID</dt><dd>{detail.root_pid || "—"}{detail.process_visible ? " · visible" : ""}</dd></div>
                     <div><dt>Tracked processes</dt><dd>{latest.tracked_pids?.length ?? "—"}</dd></div>
                     <div><dt>Interval</dt><dd>{detail.interval_seconds}s</dd></div>
+                    <div><dt>Training started</dt><dd>{formatTime(detail.started_at)}</dd></div>
+                    <div><dt>Training completed</dt><dd>{formatTime(detail.completed_at)}</dd></div>
                     <div><dt>Last sample</dt><dd>{formatTime(latest.timestamp_utc)}</dd></div>
                     <div><dt>Log file</dt><dd className="monitor-path" title={detail.resource_log}>{detail.resource_log}</dd></div>
                   </dl>

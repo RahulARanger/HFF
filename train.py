@@ -202,7 +202,7 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--batch_size', default=1, type=int)
     parser.add_argument(
         '--num_workers',
-        default=5,
+        default=4,
         type=int,
         help='DataLoader worker processes for train and validation (default: 5).',
     )

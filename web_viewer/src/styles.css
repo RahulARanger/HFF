@@ -13,11 +13,21 @@ button { cursor: pointer; }
 button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity: 0.48; }
 
 .app-shell { display: grid; grid-template-columns: 248px minmax(0, 1fr); height: 100vh; overflow: hidden; background: #0b1017; }
+.app-shell.rail-collapsed { grid-template-columns: 62px minmax(0, 1fr); }
 .control-rail { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid #243240; background: #0d141c; }
 .brand-block { display: flex; align-items: center; gap: 11px; height: 74px; padding: 0 20px; border-bottom: 1px solid #243240; }
 .brand-mark { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid #43b7e8; color: #43b7e8; font-size: 15px; font-weight: 700; letter-spacing: -0.04em; }
 .brand-name { font-size: 14px; font-weight: 670; letter-spacing: 0.01em; }
 .brand-subtitle { margin-top: 3px; color: #7e93a7; font-size: 11px; letter-spacing: 0.04em; }
+.rail-toggle { display: grid; place-items: center; width: 25px; height: 25px; margin-left: auto; padding: 0; border: 1px solid #3a5364; color: #b9d1dc; background: #121d27; font-size: 19px; line-height: 1; }
+.rail-toggle:hover { border-color: #43b7e8; color: #eaf7ff; background: #19445e; }
+.rail-collapsed .brand-block { justify-content: center; padding: 0; }
+.rail-collapsed .brand-block > div:not(.brand-mark), .rail-collapsed .rail-scroll > :not(.mode-section), .rail-collapsed .rail-footer span { display: none; }
+.rail-collapsed .rail-toggle { margin-left: 0; }
+.rail-collapsed .rail-scroll { padding: 18px 9px; }
+.rail-collapsed .mode-button { justify-content: center; padding: 0; font-size: 0; }
+.rail-collapsed .mode-bar { width: 3px; height: 18px; }
+.rail-collapsed .rail-footer { justify-content: center; padding: 0; }
 .rail-scroll { min-height: 0; overflow: auto; padding: 18px 15px; }
 .rail-section { padding: 0 6px 18px; margin-bottom: 17px; border-bottom: 1px solid #22303d; }
 .mode-section { padding-top: 1px; }
@@ -151,6 +161,14 @@ input[type="range"] { width: 100%; accent-color: #43b7e8; }
 .monitor-layout { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 13px; max-width: 1420px; min-height: 520px; margin: 0 auto; }
 .monitor-run-list, .monitor-detail-panel, .monitor-data-panel { border: 1px solid #263b49; background: #0e171f; }
 .monitor-run-list { min-width: 0; overflow: hidden; }
+.monitor-run-group { border-bottom: 1px solid #263b49; }
+.monitor-run-group:last-child { border-bottom: 0; }
+.monitor-run-group-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 12px 13px 3px; }
+.monitor-run-group-heading > div { min-width: 0; }
+.monitor-run-group-heading strong { display: block; overflow: hidden; color: #e3f0f6; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-run-group-heading span { display: block; margin-top: 3px; color: #718899; font-size: 9px; }
+.monitor-run-group-times { display: flex; justify-content: space-between; gap: 8px; padding: 0 13px 4px; color: #718899; font-size: 9px; white-space: nowrap; }
+.monitor-run-group-times span { overflow: hidden; text-overflow: ellipsis; }
 .monitor-panel-heading { display: flex; align-items: center; justify-content: space-between; min-height: 40px; padding: 0 13px; border-bottom: 1px solid #263b49; color: #c5d6e1; font-size: 11px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; }
 .monitor-panel-heading > span:last-child { color: #6f8798; font-size: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .monitor-run-card { display: block; width: 100%; padding: 13px; border: 0; border-bottom: 1px solid #21323f; color: inherit; background: transparent; text-align: left; }
@@ -174,6 +192,7 @@ input[type="range"] { width: 100%; accent-color: #43b7e8; }
 .monitor-run-card-values strong { margin-left: 3px; color: #c7d8e3; font-weight: 600; font-variant-numeric: tabular-nums; }
 .monitor-run-card-epochs { display: flex; justify-content: space-between; gap: 8px; margin-top: 9px; color: #728a9b; font-size: 10px; }
 .monitor-run-card-epochs strong { color: #d5e5ed; font-weight: 600; font-variant-numeric: tabular-nums; }
+.monitor-run-card-completed { margin-top: 7px; color: #607989; font-size: 9px; }
 .monitor-detail-panel { min-width: 0; padding: 17px; }
 .monitor-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 3px 3px 17px; }
 .monitor-detail-header h2 { margin: 6px 0 0; color: #edf6fa; font-size: 17px; font-weight: 610; letter-spacing: -0.01em; }

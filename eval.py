@@ -83,7 +83,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--num_workers',
         type=int,
-        default=5,
+        default=4,
         help='DataLoader worker processes for inference (default: 5).',
     )
     parser.add_argument('-l','--loss', type=str, default='dice')

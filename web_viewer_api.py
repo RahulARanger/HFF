@@ -321,11 +321,34 @@ def monitor_record(
     ]
     peak_cpu = summary.get("peak_cpu_utilization_percent") or (max(cpu_values) if cpu_values else None)
     progress = training_progress(log_path, manifest, include_history=include_training_history)
+    fold_started_at = (
+        fold_entry.get("started_at_utc") if fold_entry else None
+    ) or summary.get("started_at_utc") or (samples[0].get("timestamp_utc") if samples else None)
+    fold_completed_at = (
+        fold_entry.get("completed_at_utc") if fold_entry else None
+    ) or summary.get("completed_at_utc")
+    if fold_completed_at is None and has_summary:
+        fold_completed_at = datetime.fromtimestamp(summary_path.stat().st_mtime, timezone.utc).isoformat()
+    group_id = manifest_path.relative_to(results_root).as_posix() if manifest_path else log_path.relative_to(results_root).as_posix()
+    group_started_at = manifest.get("created_at_utc") or fold_started_at
+    group_completed_at = manifest.get("completed_at_utc")
+    if group_completed_at is None and isinstance(fold_entries, list) and fold_entries and all(
+        isinstance(entry, dict) and entry.get("status") == "completed" for entry in fold_entries
+    ):
+        completed_times = [entry.get("completed_at_utc") for entry in fold_entries if entry.get("completed_at_utc")]
+        group_completed_at = max(completed_times) if completed_times else fold_completed_at
     return {
         "id": log_path.relative_to(results_root).as_posix(),
         "label": f"{run_name} · {fold}",
         "run_name": run_name,
         "fold": fold,
+        "group_id": group_id,
+        "group_label": run_name,
+        "group_status": manifest.get("status") if manifest else status,
+        "group_started_at": group_started_at,
+        "group_completed_at": group_completed_at,
+        "started_at": fold_started_at,
+        "completed_at": fold_completed_at,
         "backend": latest.get("backend") or summary.get("backend") or "unknown",
         "status": status,
         "updated_at": latest.get("timestamp_utc") or modified_at.isoformat(),

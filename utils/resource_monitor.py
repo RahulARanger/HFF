@@ -387,6 +387,7 @@ class ResourceMonitor:
             "backend": self.backend,
             "root_pid": self.root_pid,
             "started_at_utc": self._started_at_utc,
+            "completed_at_utc": _utc_timestamp(),
             "sample_count": self._peak.samples,
             "peak_ram_rss_bytes": self._peak.ram_rss_bytes,
             "peak_ram_uss_bytes": self._peak.ram_uss_bytes or None,

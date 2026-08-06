@@ -218,6 +218,7 @@ export default function App() {
   const [startupAttempt, setStartupAttempt] = useState(0);
   const [generating, setGenerating] = useState(false);
   const [outputRevision, setOutputRevision] = useState(0);
+  const [railCollapsed, setRailCollapsed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -326,7 +327,7 @@ export default function App() {
   };
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${railCollapsed ? "rail-collapsed" : ""}`}>
       <aside className="control-rail">
         <div className="brand-block">
           <div className="brand-mark">H</div>
@@ -334,6 +335,9 @@ export default function App() {
             <div className="brand-name">HFF-Net</div>
             <div className="brand-subtitle">BraTS viewer</div>
           </div>
+          <button className="rail-toggle" type="button" onClick={() => setRailCollapsed((current) => !current)} aria-label={railCollapsed ? "Expand sidebar" : "Collapse sidebar"} title={railCollapsed ? "Expand sidebar" : "Collapse sidebar"}>
+            {railCollapsed ? "›" : "‹"}
+          </button>
         </div>
 
         <div className="rail-scroll">
