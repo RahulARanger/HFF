@@ -18,6 +18,7 @@ from loss.loss_function import segmentation_loss
 from model.HFF import HFFNet
 from loader.dataload3d import get_loaders
 from utils.utils import clear_device_cache, get_device
+from utils.resource_monitor import start_resource_monitor
 from warnings import simplefilter
 
 simplefilter(action='ignore', category=FutureWarning)
@@ -194,6 +195,12 @@ if __name__ == '__main__':
     parser.add_argument('--queue_length', default=48, type=int)
     parser.add_argument('--samples_per_volume_train', default=4, type=int)
     parser.add_argument('--samples_per_volume_val', default=8, type=int) 
+    parser.add_argument(
+        '--resource-monitor-interval',
+        type=float,
+        default=5.0,
+        help='Seconds between RAM/accelerator memory samples (default: 5).',
+    )
     parser.add_argument('-i', '--display_iter', default=1, type=int)
     parser.add_argument('-n', '--network', default='hff', type=str)
     # 
@@ -244,6 +251,11 @@ if __name__ == '__main__':
     data_files = dict(train=args.train_list, val=args.val_list)
     loaders = get_loaders(data_files, args.selected_modal, args.batch_size, num_workers=8)
     loaders = {x: loaders[x] for x in ('train', 'val')}
+    resource_monitor = start_resource_monitor(
+        device=device,
+        output_directory=path_trained_models,
+        interval_seconds=args.resource_monitor_interval,
+    )
 
 
     num_batches = {'train_sup': len(loaders['train']), 'val': len(loaders['val'])}
@@ -537,4 +549,5 @@ if __name__ == '__main__':
     print_best(classnum, best_val_eval_list, best_model, best_result, path_trained_models, print_num_minus)
     save_training_metrics(metrics_path, args, metrics_history, best_result, best_val_eval_list, best_epoch)
     print('=' * print_num)
+    resource_monitor.stop()
     wandb.finish()

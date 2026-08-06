@@ -42,6 +42,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--folds", type=int, default=DEFAULT_FOLDS, help="Number of folds (default: 5).")
     parser.add_argument("--seed", type=int, default=42, help="Seed used only to allocate patients to folds.")
     parser.add_argument(
+        "--resource-monitor-interval",
+        type=float,
+        default=5.0,
+        help="Seconds between RAM/accelerator samples for every fold (default: 5).",
+    )
+    parser.add_argument(
         "--results-dir",
         type=Path,
         default=Path("result/cross_validation"),
@@ -71,6 +77,8 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="Create and validate the splits without launching training.",
     )
     args, train_args = parser.parse_known_args()
+    if args.resource_monitor_interval <= 0:
+        parser.error("--resource-monitor-interval must be positive.")
     # argparse retains the ``--`` separator in unknown arguments.  It is only
     # meaningful to this wrapper and must not be forwarded to train.py.
     if train_args[:1] == ["--"]:
@@ -208,6 +216,7 @@ def main() -> int:
         "fold_count": args.folds,
         "split_seed": args.seed,
         "epochs_per_fold": args.epochs,
+        "resource_monitor_interval_seconds": args.resource_monitor_interval,
         "forwarded_train_arguments": train_args,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "status": "prepared" if args.dry_run else "running",
@@ -230,6 +239,7 @@ def main() -> int:
                 "train_list": str(train_list),
                 "validation_list": str(validation_list),
                 "output_dir": str(fold_dir),
+                "resource_monitoring": "enabled",
                 "status": "pending",
             }
         )
@@ -261,12 +271,14 @@ def main() -> int:
             "--val_list", str(validation_list),
             "--num_epochs", str(args.epochs),
             "--path_trained_models", str(fold_dir),
+            "--resource-monitor-interval", str(args.resource_monitor_interval),
             *train_args,
         ]
         LOGGER.info("Starting fold %d/%d", fold_index, args.folds)
         try:
             subprocess.run(command, check=True)
             fold_metrics = read_fold_metrics(fold_dir)
+            resource_summary_files = sorted(fold_dir.rglob("*_resource_summary.json"))
         except (subprocess.CalledProcessError, OSError, RuntimeError, json.JSONDecodeError):
             manifest["status"] = "failed"
             manifest["failed_fold"] = fold_index
@@ -275,6 +287,9 @@ def main() -> int:
             write_json(manifest_path, manifest)
             raise
         fold_results.append({"fold": fold_index, "metrics": fold_metrics})
+        manifest["folds"][fold_index - 1]["resource_summary_files"] = [
+            str(path) for path in resource_summary_files
+        ]
         manifest["folds"][fold_index - 1]["status"] = "completed"
         manifest["folds"][fold_index - 1]["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
         write_json(manifest_path, manifest)
