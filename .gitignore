@@ -14,3 +14,4 @@ STDIN.*
 *.gz
 result/cross_validation
 .virtual_documents
+node_modules

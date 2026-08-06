@@ -147,11 +147,25 @@ def _query_nvml_processes(nvml: Any, handle: Any) -> list[Any]:
     return []
 
 
+def _query_nvml_process_utilization(nvml: Any, handle: Any, last_seen_timestamp: int) -> tuple[list[Any], int]:
+    """Read process-scoped SM utilization when the installed NVML supports it."""
+    query = getattr(nvml, "nvmlDeviceGetProcessUtilization", None)
+    if query is None:
+        return [], last_seen_timestamp
+    try:
+        samples = list(query(handle, last_seen_timestamp))
+    except nvml.NVMLError:
+        return [], last_seen_timestamp
+    timestamps = [int(getattr(sample, "timeStamp", last_seen_timestamp)) for sample in samples]
+    return samples, max([last_seen_timestamp, *timestamps])
+
+
 @dataclass
 class _PeakValues:
     ram_rss_bytes: int = 0
     ram_uss_bytes: int = 0
     gpu_memory_bytes: int = 0
+    cpu_utilization_percent: float = 0.0
     samples: int = 0
 
     def update(self, sample: dict[str, Any]) -> None:
@@ -159,6 +173,10 @@ class _PeakValues:
         self.ram_rss_bytes = max(self.ram_rss_bytes, int(sample.get("ram_rss_bytes", 0)))
         self.ram_uss_bytes = max(self.ram_uss_bytes, int(sample.get("ram_uss_bytes") or 0))
         self.gpu_memory_bytes = max(self.gpu_memory_bytes, int(sample.get("gpu_memory_bytes") or 0))
+        self.cpu_utilization_percent = max(
+            self.cpu_utilization_percent,
+            float(sample.get("cpu_utilization_percent") or 0.0),
+        )
 
 
 @dataclass
@@ -175,6 +193,8 @@ class ResourceMonitor:
     _started_at: float = field(default_factory=time.monotonic, init=False)
     _started_at_utc: str = field(default_factory=_utc_timestamp, init=False)
     _peak: _PeakValues = field(default_factory=_PeakValues, init=False)
+    _cpu_previous_seconds: dict[int, float] = field(default_factory=dict, init=False)
+    _cpu_previous_at: float | None = field(default=None, init=False)
     _sample: Callable[[], dict[str, Any]] | None = field(default=None, init=False)
     _stopped: bool = field(default=False, init=False)
 
@@ -210,6 +230,7 @@ class ResourceMonitor:
     def _base_sample(self) -> dict[str, Any]:
         processes = _tracked_processes(self.root_pid)
         ram_rss, ram_uss, pids = _ram_usage(processes)
+        cpu_utilization, cpu_utilization_one_core = self._cpu_usage(processes)
         return {
             "timestamp_utc": _utc_timestamp(),
             "elapsed_seconds": time.monotonic() - self._started_at,
@@ -218,8 +239,43 @@ class ResourceMonitor:
             "backend": self.backend,
             "ram_rss_bytes": ram_rss,
             "ram_uss_bytes": ram_uss,
+            "cpu_utilization_percent": cpu_utilization,
+            "cpu_utilization_one_core_percent": cpu_utilization_one_core,
             "gpu_memory_bytes": None,
+            "gpu_utilization_percent": None,
         }
+
+    def _cpu_usage(self, processes: Iterable[psutil.Process]) -> tuple[float | None, float | None]:
+        """Return tracked-tree CPU usage, normalized to the host and one core."""
+        now = time.monotonic()
+        previous_at = self._cpu_previous_at
+        self._cpu_previous_at = now
+        current_pids: set[int] = set()
+        total_delta_seconds = 0.0
+        for process in processes:
+            try:
+                pid = process.pid
+                current_pids.add(pid)
+                cpu_times = process.cpu_times()
+                current_seconds = float(cpu_times.user + cpu_times.system)
+                previous_seconds = self._cpu_previous_seconds.get(pid)
+                self._cpu_previous_seconds[pid] = current_seconds
+                if previous_seconds is not None:
+                    total_delta_seconds += max(0.0, current_seconds - previous_seconds)
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+        self._cpu_previous_seconds = {
+            pid: value for pid, value in self._cpu_previous_seconds.items() if pid in current_pids
+        }
+        if previous_at is None:
+            return None, None
+        elapsed = now - previous_at
+        if elapsed <= 0:
+            return None, None
+        one_core_percent = (total_delta_seconds / elapsed) * 100.0
+        host_cpu_count = max(1, psutil.cpu_count() or 1)
+        host_percent = one_core_percent / host_cpu_count
+        return round(host_percent, 2), round(one_core_percent, 2)
 
     def _make_cpu_sampler(self) -> Callable[[], dict[str, Any]]:
         return self._base_sample
@@ -240,12 +296,14 @@ class ResourceMonitor:
         handles = _select_nvml_handles(nvml, _visible_device_token())
         if not handles:
             raise RuntimeError("Could not resolve CUDA_VISIBLE_DEVICES to an NVML device or MIG handle.")
+        last_seen_timestamps = {uuid: 0 for _, uuid in handles}
 
         def sample() -> dict[str, Any]:
             result = self._base_sample()
             tracked_pids = set(result["tracked_pids"])
             process_memory: dict[str, int] = {}
             device_memory: dict[str, int] = {}
+            process_utilization: list[float] = []
             for handle, uuid in handles:
                 used_on_device = 0
                 for process in _query_nvml_processes(nvml, handle):
@@ -259,6 +317,17 @@ class ResourceMonitor:
                     process_memory[str(pid)] = process_memory.get(str(pid), 0) + used_memory
                     used_on_device += used_memory
                 device_memory[uuid] = used_on_device
+                utilization_samples, last_seen_timestamps[uuid] = _query_nvml_process_utilization(
+                    nvml,
+                    handle,
+                    last_seen_timestamps[uuid],
+                )
+                for process in utilization_samples:
+                    if int(getattr(process, "pid", -1)) not in tracked_pids:
+                        continue
+                    sm_utilization = getattr(process, "smUtil", None)
+                    if isinstance(sm_utilization, (int, float)):
+                        process_utilization.append(float(sm_utilization))
 
             result.update(
                 {
@@ -266,6 +335,7 @@ class ResourceMonitor:
                     "gpu_memory_bytes": sum(process_memory.values()),
                     "gpu_memory_by_pid_bytes": process_memory,
                     "gpu_memory_by_device_bytes": device_memory,
+                    "gpu_utilization_percent": max(process_utilization) if process_utilization else None,
                 }
             )
             try:
@@ -320,6 +390,7 @@ class ResourceMonitor:
             "peak_ram_rss_bytes": self._peak.ram_rss_bytes,
             "peak_ram_uss_bytes": self._peak.ram_uss_bytes or None,
             "peak_gpu_memory_bytes": self._peak.gpu_memory_bytes or None,
+            "peak_cpu_utilization_percent": self._peak.cpu_utilization_percent or None,
             "usage_log": str(self.output_path),
         }
         self.summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

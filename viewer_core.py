@@ -245,8 +245,8 @@ def resolve_subject(dataset_root: Path, subject_id: str) -> Path:
     root = dataset_root.resolve()
     if candidate != root and root not in candidate.parents:
         raise ValueError("Subject path is outside the configured dataset root.")
-    if not candidate.is_dir() or subject_files(candidate)[1] is None:
-        raise FileNotFoundError(f"Not a BraTS record folder: {subject_id}")
+    if not candidate.is_dir() or not subject_files(candidate)[0]:
+        raise FileNotFoundError(f"Not a scan folder: {subject_id}")
     return candidate
 
 
@@ -254,9 +254,12 @@ def resolve_subject(dataset_root: Path, subject_id: str) -> Path:
 def discover_subject_ids(dataset_root_string: str) -> tuple[str, ...]:
     dataset_root = Path(dataset_root_string).resolve()
     subject_ids = {
-        segmentation.parent.relative_to(dataset_root).as_posix()
-        for segmentation in dataset_root.rglob("*_seg.nii*")
-        if segmentation.is_file()
+        scan.parent.relative_to(dataset_root).as_posix()
+        for scan in dataset_root.rglob("*")
+        if scan.is_file()
+        and is_nifti_file(scan)
+        and "_seg" not in scan.name
+        and not is_frequency_file(scan)
     }
     return tuple(sorted(subject_ids))
 

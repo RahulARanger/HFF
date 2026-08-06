@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "start": "node scripts/start-viewer.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },

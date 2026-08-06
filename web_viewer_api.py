@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from datetime import datetime, timezone
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
@@ -57,8 +58,14 @@ class GenerateRequest(BaseModel):
 
 class ViewerServer:
     def __init__(self, dataset_root: Path, results_root: Path) -> None:
-        self.dataset_root = dataset_root.expanduser().resolve()
-        self.results_root = results_root.expanduser().resolve()
+        self.dataset_root = self._resolve_project_path(dataset_root)
+        self.results_root = self._resolve_project_path(results_root)
+
+    @staticmethod
+    def _resolve_project_path(path: Path) -> Path:
+        """Resolve relative CLI paths from the repository, not the shell cwd."""
+        expanded = path.expanduser()
+        return (PROJECT_ROOT / expanded if not expanded.is_absolute() else expanded).resolve()
 
     def subject(self, subject_id: str) -> Path:
         try:
@@ -109,7 +116,9 @@ def binary_volume_response(
     )
 
 
+@lru_cache(maxsize=64)
 def reference_spacing(path: Path) -> tuple[float, float, float]:
+    """Cache image-header reads shared by metadata and volume responses."""
     return tuple(float(value) for value in sitk.ReadImage(str(path)).GetSpacing())
 
 
@@ -166,7 +175,60 @@ def monitor_value_peak(samples: list[dict[str, object]], field: str) -> int | No
     return max(numeric) if numeric else None
 
 
-def monitor_record(log_path: Path, results_root: Path, sample_limit: int = 60) -> dict[str, object]:
+def training_metrics_file(log_path: Path) -> Path | None:
+    """Find the metrics written beside the checkpoint for this fold."""
+    candidate = log_path.parent / "training_metrics.json"
+    if candidate.is_file():
+        return candidate
+    return next(
+        (path for path in log_path.parents if (path / "training_metrics.json").is_file()),
+        None,
+    )
+
+
+def training_progress(
+    log_path: Path,
+    manifest: dict[str, object],
+    *,
+    include_history: bool = False,
+) -> dict[str, object]:
+    metrics_path = training_metrics_file(log_path)
+    metrics = read_json(metrics_path) if metrics_path else {}
+    history = metrics.get("epochs", [])
+    if not isinstance(history, list):
+        history = []
+    configuration = metrics.get("configuration", {})
+    if not isinstance(configuration, dict):
+        configuration = {}
+    total_epochs = configuration.get("num_epochs") or manifest.get("epochs_per_fold")
+    total_epochs = int(total_epochs) if total_epochs is not None else None
+    completed_epochs = len(history)
+    pending_epochs = max(total_epochs - completed_epochs, 0) if total_epochs is not None else None
+    progress_percent = (
+        round((completed_epochs / total_epochs) * 100, 1)
+        if total_epochs and total_epochs > 0
+        else None
+    )
+    result: dict[str, object] = {
+        "completed_epochs": completed_epochs,
+        "total_epochs": total_epochs,
+        "pending_epochs": pending_epochs,
+        "progress_percent": progress_percent,
+        "latest_epoch": history[-1] if history else None,
+        "metrics_file": metrics_path.name if metrics_path else None,
+    }
+    if include_history:
+        result["history"] = history
+    return result
+
+
+def monitor_record(
+    log_path: Path,
+    results_root: Path,
+    sample_limit: int = 60,
+    *,
+    include_training_history: bool = False,
+) -> dict[str, object]:
     summary_path = log_path.with_name(log_path.name.replace(MONITOR_LOG_SUFFIX, MONITOR_SUMMARY_SUFFIX))
     samples = read_jsonl_tail(log_path, sample_limit)
     summary = read_json(summary_path)
@@ -198,6 +260,7 @@ def monitor_record(log_path: Path, results_root: Path, sample_limit: int = 60) -
     peak_ram_rss = summary.get("peak_ram_rss_bytes") or monitor_value_peak(samples, "ram_rss_bytes")
     peak_ram_uss = summary.get("peak_ram_uss_bytes") or monitor_value_peak(samples, "ram_uss_bytes")
     peak_gpu = summary.get("peak_gpu_memory_bytes") or monitor_value_peak(samples, "gpu_memory_bytes")
+    progress = training_progress(log_path, manifest, include_history=include_training_history)
     return {
         "id": log_path.relative_to(results_root).as_posix(),
         "label": f"{run_name} · {fold}",
@@ -213,6 +276,7 @@ def monitor_record(log_path: Path, results_root: Path, sample_limit: int = 60) -
         "resource_log": log_path.relative_to(results_root).as_posix(),
         "summary_file": summary_path.relative_to(results_root).as_posix() if summary_path.is_file() else None,
         "manifest_file": manifest_path.relative_to(results_root).as_posix() if manifest_path else None,
+        "training": progress,
         "latest": latest,
         "peak": {
             "ram_rss_bytes": peak_ram_rss,
@@ -251,11 +315,46 @@ def create_app(dataset_root: Path = DEFAULT_DATA_ROOT, results_root: Path = DEFA
                 {
                     "id": subject_id,
                     "label": subject_dir.name,
+                    "path": subject_id,
                     "modalities": modalities,
                     "has_segmentation": segmentation is not None,
                 }
             )
         return {"subjects": records}
+
+    @app.get("/api/folders")
+    def folders(path: str = "") -> dict[str, object]:
+        """List directories lazily without inspecting their files."""
+        root = state.dataset_root.resolve()
+        if not root.is_dir():
+            raise HTTPException(
+                status_code=503,
+                detail=f"Configured dataset root does not exist: {root}",
+            )
+        candidate = (root / path).resolve()
+        if candidate != root and root not in candidate.parents:
+            raise HTTPException(status_code=400, detail="Folder path is outside the dataset root.")
+        if not candidate.is_dir():
+            raise HTTPException(status_code=404, detail="Folder does not exist.")
+        relative_path = candidate.relative_to(root).as_posix()
+        child_folders = [
+            child
+            for child in candidate.iterdir()
+            if child.is_dir() and not child.name.startswith(".")
+        ]
+        child_folders.sort(key=lambda child: child.name.lower())
+        return {
+            "root": root.name,
+            "path": relative_path,
+            "folders": [
+                {
+                    "id": child.relative_to(root).as_posix(),
+                    "label": child.name,
+                    "path": child.relative_to(root).as_posix(),
+                }
+                for child in child_folders
+            ],
+        }
 
     @app.get("/api/checkpoints")
     def checkpoints() -> dict[str, object]:
@@ -291,7 +390,12 @@ def create_app(dataset_root: Path = DEFAULT_DATA_ROOT, results_root: Path = DEFA
             raise HTTPException(status_code=404, detail="Unknown monitor run.")
         if not candidate.is_file():
             raise HTTPException(status_code=404, detail="Unknown monitor run.")
-        record = monitor_record(candidate, state.results_root, sample_limit=limit)
+        record = monitor_record(
+            candidate,
+            state.results_root,
+            sample_limit=limit,
+            include_training_history=True,
+        )
         record["samples"] = read_jsonl_tail(candidate, limit)
         return record
 
