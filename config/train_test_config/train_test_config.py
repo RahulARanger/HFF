@@ -154,34 +154,44 @@ def print_val_eval_sup(num_classes, score_list_val, mask_list_val, print_num):
         val_m_jc = eval_list[1]
     return eval_list, val_m_jc
 
-def print_val_eval(num_classes, score_list_val1, score_list_val2, mask_list_val, print_num):
-    # if num_classes == 2:
-    #     eval_list1 = evaluate(score_list_val1, mask_list_val)
-    #     eval_list2 = evaluate(score_list_val2, mask_list_val)
-    #     print('| Val Thr 1: {:.4f}'.format(eval_list1[0]).ljust(print_num, ' '), '| Val Thr 2: {:.4f}'.format(eval_list2[0]).ljust(print_num, ' '), '|')
-    #     print('| Val  Jc 1: {:.4f}'.format(eval_list1[1]).ljust(print_num, ' '), '| Val  Jc 2: {:.4f}'.format(eval_list2[1]).ljust(print_num, ' '), '|')
-    #     print('| Val  Dc 1: {:.4f}'.format(eval_list1[2]).ljust(print_num, ' '), '| Val  Dc 2: {:.4f}'.format(eval_list2[2]).ljust(print_num, ' '), '|')
-    #     print('| Val  Hd 1: {:.4f}'.format(eval_list1[3]).ljust(print_num, ' '), '| Val  Hd 2: {:.4f}'.format(eval_list2[3]).ljust(print_num, ' '), '|')
-
-    #     val_m_dc1 = eval_list1[2]
-    #     val_m_dc2 = eval_list2[2]
+def _print_val_eval_metrics(num_classes, eval_list1, eval_list2, print_num):
+    """Print already-computed validation metrics and return selection values."""
     if num_classes == 2:
-        # 如果样本数超过10，则按组评估；否则直接评估
+        np.set_printoptions(precision=4, suppress=True)
+        print('| Val Dice LF: {:.4f}'.format(eval_list1[0]).ljust(print_num, ' '),
+              '| Val Dice HF: {:.4f}'.format(eval_list2[0]).ljust(print_num, ' '), '|')
+        print('| Val HD95 LF: {:.4f}'.format(eval_list1[1]).ljust(print_num, ' '),
+              '| Val HD95 HF: {:.4f}'.format(eval_list2[1]).ljust(print_num, ' '), '|')
+        val_m_dc1 = eval_list1[0]
+        val_m_dc2 = eval_list2[0]
+    else:
+        np.set_printoptions(precision=4, suppress=True)
+        print('| Val ET Dice LF: {:.4f}'.format(eval_list1[0]).ljust(print_num, ' '),
+              '| Val ET Dice HF: {:.4f}'.format(eval_list2[0]).ljust(print_num, ' '), '|')
+        print('| Val ET HD95 LF: {:.4f}'.format(eval_list1[1]).ljust(print_num, ' '),
+              '| Val ET HD95 HF: {:.4f}'.format(eval_list2[1]).ljust(print_num, ' '), '|')
+        print('| Val TC Dice LF: {:.4f}'.format(eval_list1[2]).ljust(print_num, ' '),
+              '| Val TC Dice HF: {:.4f}'.format(eval_list2[2]).ljust(print_num, ' '), '|')
+        print('| Val TC HD95 LF: {:.4f}'.format(eval_list1[3]).ljust(print_num, ' '),
+              '| Val TC HD95 HF: {:.4f}'.format(eval_list2[3]).ljust(print_num, ' '), '|')
+        print('| Val WT Dice LF: {:.4f}'.format(eval_list1[4]).ljust(print_num, ' '),
+              '| Val WT Dice HF: {:.4f}'.format(eval_list2[4]).ljust(print_num, ' '), '|')
+        print('| Val WT HD95 LF: {:.4f}'.format(eval_list1[5]).ljust(print_num, ' '),
+              '| Val WT HD95 HF: {:.4f}'.format(eval_list2[5]).ljust(print_num, ' '), '|')
+        val_m_dc1 = eval_list1[2]
+        val_m_dc2 = eval_list2[2]
+    return eval_list1, eval_list2, val_m_dc1, val_m_dc2
+
+
+def print_val_eval(num_classes, score_list_val1, score_list_val2, mask_list_val, print_num):
+    """Evaluate and print validation logits using the legacy grouping policy."""
+    if num_classes == 2:
         if score_list_val1.shape[0] > 10:
             eval_list1 = evaluate_groupwise_binary(score_list_val1, mask_list_val, group_size=10)
             eval_list2 = evaluate_groupwise_binary(score_list_val2, mask_list_val, group_size=10)
         else:
             eval_list1 = evaluate_multi_binary(score_list_val1, mask_list_val)
             eval_list2 = evaluate_multi_binary(score_list_val2, mask_list_val)
-        
-        np.set_printoptions(precision=4, suppress=True)
-        print('| Val Dice LF: {:.4f}'.format(eval_list1[0]).ljust(print_num, ' '),
-              '| Val Dice HF: {:.4f}'.format(eval_list2[0]).ljust(print_num, ' '), '|')
-        print('| Val HD95 LF: {:.4f}'.format(eval_list1[1]).ljust(print_num, ' '),
-              '| Val HD95 HF: {:.4f}'.format(eval_list2[1]).ljust(print_num, ' '), '|')
-        
-        val_m_dc1 = eval_list1[0]  # 可根据需求调整，这里取 Dice 值作为指标
-        val_m_dc2 = eval_list2[0]
     else:
         if score_list_val1.shape[0] > 10:
             eval_list1 = evaluate_groupwise(score_list_val1, mask_list_val, group_size=10)
@@ -190,24 +200,12 @@ def print_val_eval(num_classes, score_list_val1, score_list_val2, mask_list_val,
             eval_list1 = evaluate_multi(score_list_val1, mask_list_val)
             eval_list2 = evaluate_multi(score_list_val2, mask_list_val)
 
-        np.set_printoptions(precision=4, suppress=True)
+    return _print_val_eval_metrics(num_classes, eval_list1, eval_list2, print_num)
 
-        print('| Val ET Dice LF: {:.4f}'.format(eval_list1[0]).ljust(print_num, ' '),
-            '| Val ET Dice HF: {:.4f}'.format(eval_list2[0]).ljust(print_num, ' '), '|')
-        print('| Val ET HD95 LF: {:.4f}'.format(eval_list1[1]).ljust(print_num, ' '),
-            '| Val ET HD95 HF: {:.4f}'.format(eval_list2[1]).ljust(print_num, ' '), '|')
-        print('| Val TC Dice LF: {:.4f}'.format(eval_list1[2]).ljust(print_num, ' '),
-            '| Val TC Dice HF: {:.4f}'.format(eval_list2[2]).ljust(print_num, ' '), '|')
-        print('| Val TC HD95 LF: {:.4f}'.format(eval_list1[3]).ljust(print_num, ' '),
-            '| Val TC HD95 HF: {:.4f}'.format(eval_list2[3]).ljust(print_num, ' '), '|')
-        print('| Val WT Dice LF: {:.4f}'.format(eval_list1[4]).ljust(print_num, ' '),
-            '| Val WT Dice HF: {:.4f}'.format(eval_list2[4]).ljust(print_num, ' '), '|')
-        print('| Val WT HD95 LF: {:.4f}'.format(eval_list1[5]).ljust(print_num, ' '),
-            '| Val WT HD95 HF: {:.4f}'.format(eval_list2[5]).ljust(print_num, ' '), '|')
 
-        val_m_dc1 = eval_list1[2]
-        val_m_dc2 = eval_list2[2]
-    return eval_list1, eval_list2, val_m_dc1, val_m_dc2
+def print_val_eval_metrics(num_classes, eval_list1, eval_list2, print_num):
+    """Print metrics produced by ``StreamingValidationMetrics``."""
+    return _print_val_eval_metrics(num_classes, eval_list1, eval_list2, print_num)
 
 def save_val_best_sup_2d(num_classes, best_list, model, score_list_val, name_list_val, eval_list, path_trained_model, path_seg_results, palette, model_name):
 
@@ -420,8 +418,7 @@ def save_val_best_3d(num_classes, best_model, best_list, best_result, model1, mo
 
 
 def save_val_best_3d_m(num_classes, best_model, best_list, best_result,
-                       model1, model2, score_list_val_1, score_list_val_2,
-                       mask_list_val, eval_list_1, eval_list_2,
+                       model1, model2, eval_list_1, eval_list_2,
                        path_trained_model,):
     """
     - 二分类时：eval_list_* = [dice, hd95]
@@ -679,5 +676,3 @@ def save_test_3d(num_classes, score_test, name_test, threshold, path_seg_results
 
         output_image = tio.ScalarImage(tensor=pred_results.unsqueeze(0), affine=affine)
         output_image.save(os.path.join(path_seg_results, name_test))
-
-

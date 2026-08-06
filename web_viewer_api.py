@@ -1,8 +1,8 @@
-"""FastAPI backend for the HFF-Net VTK.js viewer.
+"""FastAPI backend for the HFF-Net NiiVue viewer.
 
-The API returns typed binary volume buffers rather than base64-encoded JSON.
-This keeps browser transfers compact and lets VTK.js construct image data
-without changing the repository's research preprocessing or model inference.
+The API keeps the existing typed-buffer endpoints for compatibility and also
+serves NIfTI responses for NiiVue. This lets the browser load scans directly
+without rebuilding every volume into a VTK.js image object.
 """
 
 from __future__ import annotations
@@ -11,17 +11,19 @@ import argparse
 from collections import deque
 from datetime import datetime, timezone
 from functools import lru_cache
+import gzip
 import json
 from pathlib import Path
 import re
 from typing import Literal
 
+import nibabel as nib
 import numpy as np
 import psutil
 import SimpleITK as sitk
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from viewer_core import (
@@ -113,6 +115,50 @@ def binary_volume_response(
         content=encoded.tobytes(order="C"),
         media_type="application/octet-stream",
         headers=headers,
+    )
+
+
+def nifti_volume_response(
+    volume: np.ndarray,
+    *,
+    reference_path: Path,
+    dtype: Literal["float32", "uint8"],
+    filename: str,
+) -> Response:
+    """Encode a z-y-x NumPy volume as a cached, compressed NIfTI response."""
+    source = nib.load(str(reference_path))
+    data = np.asarray(volume, dtype=np.float32 if dtype == "float32" else np.uint8)
+    image = nib.Nifti1Image(data.transpose(2, 1, 0), source.affine, header=source.header.copy())
+    image.set_data_dtype(np.float32 if dtype == "float32" else np.uint8)
+    image.set_qform(source.affine, code=int(source.header["qform_code"]) or 1)
+    image.set_sform(source.affine, code=int(source.header["sform_code"]) or 1)
+    image.header["scl_slope"] = 1.0
+    image.header["scl_inter"] = 0.0
+    payload = gzip.compress(image.to_bytes(), compresslevel=6, mtime=0)
+    return Response(
+        content=payload,
+        media_type="application/gzip",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
+
+def nifti_file_response(path: Path) -> Response:
+    """Serve the original compressed NIfTI without loading it into Python."""
+    if path.name.endswith(".nii.gz"):
+        return FileResponse(
+            path,
+            media_type="application/gzip",
+            filename=path.name,
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+    return nifti_volume_response(
+        load_volume(path),
+        reference_path=path,
+        dtype="float32",
+        filename=f"{path.stem}.nii.gz",
     )
 
 
@@ -462,6 +508,16 @@ def create_app(dataset_root: Path = DEFAULT_DATA_ROOT, results_root: Path = DEFA
             intensity_range=contrast_limits(actual),
         )
 
+    @app.get("/api/subjects/{subject_id:path}/volumes/{modality}/nifti")
+    def nifti_volume(subject_id: str, modality: str) -> Response:
+        """Serve the source scan in the NIfTI form expected by NiiVue."""
+        subject_dir = state.subject(subject_id)
+        modality = modality.upper()
+        if modality not in DISPLAY_MODALITIES:
+            raise HTTPException(status_code=400, detail=f"Unsupported modality: {modality}")
+        scan_path = find_scan_path(subject_dir, modality)
+        return nifti_file_response(scan_path)
+
     @app.get("/api/subjects/{subject_id:path}/frequency/{modality}/{band}")
     def frequency(subject_id: str, modality: str, band: str) -> Response:
         subject_dir = state.subject(subject_id)
@@ -480,6 +536,26 @@ def create_app(dataset_root: Path = DEFAULT_DATA_ROOT, results_root: Path = DEFA
             dtype="float32",
             spacing=reference_spacing(scan_path),
             intensity_range=contrast_limits(loaded),
+        )
+
+    @app.get("/api/subjects/{subject_id:path}/frequency/{modality}/{band}/nifti")
+    def nifti_frequency(subject_id: str, modality: str, band: str) -> Response:
+        """Encode a derived frequency volume while preserving scan geometry."""
+        subject_dir = state.subject(subject_id)
+        modality = modality.upper()
+        band = band.upper()
+        if modality not in DISPLAY_MODALITIES or band not in {"L", "H1", "H2", "H3", "H4"}:
+            raise HTTPException(status_code=400, detail="Unsupported frequency request.")
+        scan_path = find_scan_path(subject_dir, modality)
+        actual = load_volume(scan_path)
+        loaded, available = load_frequency_volume(scan_path, band, actual)
+        if not available:
+            raise HTTPException(status_code=404, detail=f"Frequency volume {band} is not available.")
+        return nifti_volume_response(
+            loaded,
+            reference_path=scan_path,
+            dtype="float32",
+            filename=f"{modality.lower()}_{band.lower()}.nii.gz",
         )
 
     @app.get("/api/subjects/{subject_id:path}/masks/{mask_kind}")
@@ -509,6 +585,42 @@ def create_app(dataset_root: Path = DEFAULT_DATA_ROOT, results_root: Path = DEFA
             labels = np.where(restrict_mask_to_scan_foreground(labels, flair) > 0, labels, 0).astype(np.uint8)
 
         return binary_volume_response(labels, dtype="uint8", spacing=reference_spacing(flair_path))
+
+    @app.get("/api/subjects/{subject_id:path}/masks/{mask_kind}/nifti")
+    def nifti_mask(
+        subject_id: str,
+        mask_kind: Literal["expected", "output"],
+        checkpoint_id: str | None = None,
+        revision: int = 0,
+    ) -> Response:
+        """Serve a segmentation as a label-aware NIfTI overlay."""
+        del revision  # The client uses this only to invalidate a prior 404/cache entry.
+        subject_dir = state.subject(subject_id)
+        flair_path = find_scan_path(subject_dir, "FLAIR")
+        flair = load_volume(flair_path)
+
+        if mask_kind == "expected":
+            segmentation = subject_files(subject_dir)[1]
+            if segmentation is None:
+                raise HTTPException(status_code=404, detail="Expected segmentation is not available.")
+            labels = canonical_segmentation_labels(load_volume(segmentation), flair.shape)
+        else:
+            if checkpoint_id is None:
+                raise HTTPException(status_code=400, detail="checkpoint_id is required for output masks.")
+            checkpoint = state.checkpoint(checkpoint_id)
+            output_path = checkpoint_output_path(state.results_root, checkpoint, subject_dir)
+            if not output_path.is_file():
+                raise HTTPException(status_code=404, detail="Generated output is not available.")
+            labels = load_volume(output_path).astype(np.uint8)
+            labels = canonical_segmentation_labels(labels, flair.shape)
+            labels = np.where(restrict_mask_to_scan_foreground(labels, flair) > 0, labels, 0).astype(np.uint8)
+
+        return nifti_volume_response(
+            labels,
+            reference_path=flair_path,
+            dtype="uint8",
+            filename=f"{mask_kind}.nii.gz",
+        )
 
     @app.post("/api/subjects/{subject_id:path}/generate")
     def generate(subject_id: str, request: GenerateRequest) -> dict[str, str]:

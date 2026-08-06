@@ -79,6 +79,8 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     args, train_args = parser.parse_known_args()
     if args.resource_monitor_interval <= 0:
         parser.error("--resource-monitor-interval must be positive.")
+    if any(argument == "--parallel-folds" or argument.startswith("--parallel-folds=") for argument in train_args):
+        parser.error("--parallel-folds has been removed; cross-validation folds always run sequentially.")
     # argparse retains the ``--`` separator in unknown arguments.  It is only
     # meaningful to this wrapper and must not be forwarded to train.py.
     if train_args[:1] == ["--"]:
@@ -199,6 +201,36 @@ def summarise_metrics(fold_results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def run_fold(
+    python_executable: str,
+    train_script: Path,
+    fold_index: int,
+    train_list: Path,
+    validation_list: Path,
+    fold_dir: Path,
+    epochs: int,
+    resource_monitor_interval: float,
+    train_args: list[str],
+) -> tuple[int, dict[str, Any], list[Path]]:
+    """Run one independent cross-validation fold."""
+    fold_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        python_executable,
+        str(train_script),
+        "--train_list", str(train_list),
+        "--val_list", str(validation_list),
+        "--num_epochs", str(epochs),
+        "--path_trained_models", str(fold_dir),
+        "--resource-monitor-interval", str(resource_monitor_interval),
+        *train_args,
+    ]
+    LOGGER.info("Starting fold %d", fold_index)
+    subprocess.run(command, check=True)
+    fold_metrics = read_fold_metrics(fold_dir)
+    resource_summary_files = sorted(fold_dir.rglob("*_resource_summary.json"))
+    return fold_index, fold_metrics, resource_summary_files
+
+
 def main() -> int:
     args, train_args = parse_args()
     if args.epochs < 1:
@@ -260,25 +292,22 @@ def main() -> int:
     fold_results: list[dict[str, Any]] = []
     train_script = Path(__file__).with_name("train.py")
     for fold_index, train_list, validation_list, fold_dir in fold_jobs:
-        fold_dir.mkdir(parents=True, exist_ok=True)
         manifest["folds"][fold_index - 1]["status"] = "running"
         manifest["folds"][fold_index - 1]["started_at_utc"] = datetime.now(timezone.utc).isoformat()
         write_json(manifest_path, manifest)
-        command = [
-            args.python,
-            str(train_script),
-            "--train_list", str(train_list),
-            "--val_list", str(validation_list),
-            "--num_epochs", str(args.epochs),
-            "--path_trained_models", str(fold_dir),
-            "--resource-monitor-interval", str(args.resource_monitor_interval),
-            *train_args,
-        ]
-        LOGGER.info("Starting fold %d/%d", fold_index, args.folds)
+
         try:
-            subprocess.run(command, check=True)
-            fold_metrics = read_fold_metrics(fold_dir)
-            resource_summary_files = sorted(fold_dir.rglob("*_resource_summary.json"))
+            _, fold_metrics, resource_summary_files = run_fold(
+                args.python,
+                train_script,
+                fold_index,
+                train_list,
+                validation_list,
+                fold_dir,
+                args.epochs,
+                args.resource_monitor_interval,
+                train_args,
+            )
         except (subprocess.CalledProcessError, OSError, RuntimeError, json.JSONDecodeError):
             manifest["status"] = "failed"
             manifest["failed_fold"] = fold_index
@@ -286,6 +315,7 @@ def main() -> int:
             manifest["folds"][fold_index - 1]["status"] = "failed"
             write_json(manifest_path, manifest)
             raise
+
         fold_results.append({"fold": fold_index, "metrics": fold_metrics})
         manifest["folds"][fold_index - 1]["resource_summary_files"] = [
             str(path) for path in resource_summary_files

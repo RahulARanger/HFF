@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #PBS -N hff_cross_train
 #PBS -q workq
-#PBS -l select=1:ncpus=32:mem=64gb:ngpus=1
+# Validation is streamed in bounded groups; 12 CPU cores are sufficient for
+# the reduced DataLoader worker count and leave the 64 GB RAM allocation clear.
+#PBS -l select=1:ncpus=12:mem=64gb:ngpus=1
 #PBS -l walltime=24:00:00
 #PBS -j oe
 

@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@kitware/vtk.js": "^36.6.0",
+    "@niivue/niivue": "^0.69.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

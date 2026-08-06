@@ -130,8 +130,21 @@ def get_loaders(data_files, selected_modals, batch_size=1, num_workers=0):
                     # test=Brain(data_files['test'], selected_modals, brain_dir, inputs_transform=input_tsfm,
                     #     labels_transform=label_tsfm, t_join_transform=None, join_transform=join_tsfm, phase='test')
                     )
-    loaders = {x: data.DataLoader(dataset=datasets[x], batch_size=batch_size,
-                                  shuffle=(x == 'train'),
-                                  num_workers=num_workers)
-               for x in ('train', 'val')}
+    loader_options = {
+        'batch_size': batch_size,
+        'num_workers': num_workers,
+        'pin_memory': True,
+        'persistent_workers': num_workers > 0,
+    }
+    if num_workers > 0:
+        loader_options['prefetch_factor'] = 2
+
+    loaders = {
+        split: data.DataLoader(
+            dataset=datasets[split],
+            shuffle=(split == 'train'),
+            **loader_options,
+        )
+        for split in ('train', 'val')
+    }
     return loaders

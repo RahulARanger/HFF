@@ -10,7 +10,8 @@ from tqdm import tqdm
 import wandb
 import nibabel as nib
 
-from config.train_test_config.train_test_config import print_val_loss, print_val_eval, save_val_best_3d_m
+from config.train_test_config.train_test_config import print_val_loss, print_val_eval_metrics
+from config.eval_config.eval import StreamingValidationMetrics
 from config.warmup_config.warmup import GradualWarmupScheduler
 from loss.loss_function import segmentation_loss
 from model.HFF import HFFNet
@@ -79,6 +80,12 @@ if __name__ == '__main__':
     
     
     parser.add_argument('-b','--batch_size', type=int, default=1)
+    parser.add_argument(
+        '--num_workers',
+        type=int,
+        default=2,
+        help='DataLoader worker processes for inference (default: 2).',
+    )
     parser.add_argument('-l','--loss', type=str, default='dice')
     parser.add_argument('--loss2', type=str, default='ff')
     parser.add_argument('--output_dir', type=str, default='./result/eval')
@@ -100,52 +107,55 @@ if __name__ == '__main__':
    
     # loader: using same list for train and val since get_loaders expects both
     data_files = dict(train=args.test_list, val=args.test_list)
-    loaders = get_loaders(data_files, args.selected_modal, args.batch_size, num_workers=4)
+    loaders = get_loaders(
+        data_files,
+        args.selected_modal,
+        args.batch_size,
+        num_workers=args.num_workers,
+    )
     val_loader = loaders['val']
     num_batches = len(val_loader)
     val_loss_sup_1 = 0.0
     val_loss_sup_2 = 0.0
 
     # inference
-    all_scores, all_masks = [], []
-    with torch.no_grad():
-        score_list_val_1 = None
-        score_list_val_2 = None
-        mask_list_val = None
+    validation_metrics = StreamingValidationMetrics(classnum, group_size=10)
+    with torch.inference_mode():
         for i, data in enumerate(tqdm(val_loader, desc='Inference')):
             # unpack modalities and mask
             # data is list of 21 tensors: 20 modalities + mask
             low_freq_inputs = []
             high_freq_inputs = []
             for j in range(20):
-                tensor = data[j].unsqueeze(1).to(device=device, dtype=torch.float32)
+                tensor = data[j].unsqueeze(1).to(
+                    device=device,
+                    dtype=torch.float32,
+                    non_blocking=True,
+                )
                 if j in [0,1,2,3]:
                     low_freq_inputs.append(tensor)
                 else:
                     high_freq_inputs.append(tensor)
             low = torch.cat(low_freq_inputs, dim=1)
             high = torch.cat(high_freq_inputs, dim=1)
-            mask_val = mask_to_class_indices(data[20], mapping).long().to(device)
+            mask_val = mask_to_class_indices(data[20], mapping).long().to(
+                device,
+                non_blocking=True,
+            )
 
             outputs_val_1, outputs_val_2, side1, side2 = model(low, high)
             loss1 = criterion(outputs_val_1, mask_val)
             loss2 = criterion(outputs_val_2, mask_val)
-            outputs_val_1_cpu = outputs_val_1.detach().cpu()
-            outputs_val_2_cpu = outputs_val_2.detach().cpu()
-            mask_cpu = mask_val.detach().cpu()
-
-            if i == 0:
-                score_list_val_1 = outputs_val_1_cpu
-                score_list_val_2 = outputs_val_2_cpu
-                mask_list_val = mask_cpu
-            else:
-                score_list_val_1 = torch.cat((score_list_val_1, outputs_val_1_cpu), dim=0)
-                score_list_val_2 = torch.cat((score_list_val_2, outputs_val_2_cpu), dim=0)
-                mask_list_val = torch.cat((mask_list_val, mask_cpu), dim=0)
+            pred_val_1 = torch.argmax(outputs_val_1, dim=1)
+            pred_val_2 = torch.argmax(outputs_val_2, dim=1)
+            validation_metrics.update(pred_val_1, pred_val_2, mask_val)
 
             val_loss_sup_1 += loss1.item()
             val_loss_sup_2 += loss2.item()
+            del (low, high, mask_val, outputs_val_1, outputs_val_2,
+                 side1, side2, loss1, loss2, pred_val_1, pred_val_2)
 
         # summarize
         print_val_loss(val_loss_sup_1, val_loss_sup_2, {'val': num_batches}, 63, 0)
-        print_val_eval(classnum, score_list_val_1, score_list_val_2, mask_list_val, 31)
+        val_eval_list_1, val_eval_list_2 = validation_metrics.compute()
+        print_val_eval_metrics(classnum, val_eval_list_1, val_eval_list_2, 31)

@@ -12,7 +12,8 @@ import wandb
 
 
 from config.train_test_config.train_test_config import print_train_loss, print_val_loss, \
-    print_val_eval, print_best,save_val_best_3d_m
+    print_val_eval_metrics, print_best, save_val_best_3d_m
+from config.eval_config.eval import StreamingValidationMetrics
 from config.warmup_config.warmup import GradualWarmupScheduler
 from loss.loss_function import segmentation_loss
 from model.HFF import HFFNet
@@ -120,14 +121,21 @@ def compute_fisher_information(model, dataloader, criterion):
         low_freq_inputs = []
         high_freq_inputs = []
         for j in range(20):  # to fit model input
-            input_tensor = data[j].unsqueeze(dim=1).to(device=device, dtype=torch.float32)
+            input_tensor = data[j].unsqueeze(dim=1).to(
+                device=device,
+                dtype=torch.float32,
+                non_blocking=True,
+            )
             if j in [0, 1, 2, 3]:
                 low_freq_inputs.append(input_tensor)
             else:
                 high_freq_inputs.append(input_tensor)
         low_freq_inputs = torch.cat(low_freq_inputs, dim=1)
         high_freq_inputs = torch.cat(high_freq_inputs, dim=1)
-        target = mask_to_class_indices(data[20], label_mapping).long().to(device)
+        target = mask_to_class_indices(data[20], label_mapping).long().to(
+            device,
+            non_blocking=True,
+        )
         outputs_train_1, outputs_train_2,side1,side2= model(low_freq_inputs, high_freq_inputs)
         loss_train_sup1 = criterion(outputs_train_1, target)
         loss_train_sup2 = criterion(outputs_train_2, target)
@@ -192,6 +200,12 @@ if __name__ == '__main__':
     parser.add_argument('--input2', default='H')
     parser.add_argument('--sup_mark', default='100', help='100')
     parser.add_argument('-b', '--batch_size', default=1, type=int)
+    parser.add_argument(
+        '--num_workers',
+        default=2,
+        type=int,
+        help='DataLoader worker processes for train and validation (default: 2).',
+    )
     parser.add_argument('-e', '--num_epochs', default=450, type=int)
     parser.add_argument('-s', '--step_size', default=50, type=int)
     parser.add_argument('-l', '--lr', default=0.3, type=float)
@@ -259,7 +273,12 @@ if __name__ == '__main__':
 
     
     data_files = dict(train=args.train_list, val=args.val_list)
-    loaders = get_loaders(data_files, args.selected_modal, args.batch_size, num_workers=8)
+    loaders = get_loaders(
+        data_files,
+        args.selected_modal,
+        args.batch_size,
+        num_workers=args.num_workers,
+    )
     loaders = {x: loaders[x] for x in ('train', 'val')}
     resource_monitor = start_resource_monitor(
         device=device,
@@ -354,7 +373,11 @@ if __name__ == '__main__':
             high_freq_inputs = []
 
             for j in range(20):  # Sort by --selected_modal parameter
-                input_tensor = data[j].unsqueeze(dim=1).to(device=device, dtype=torch.float32)
+                input_tensor = data[j].unsqueeze(dim=1).to(
+                    device=device,
+                    dtype=torch.float32,
+                    non_blocking=True,
+                )
 
                 # Sort by --selected_modal parameter
                 if j in [0, 1, 2, 3]:
@@ -363,11 +386,13 @@ if __name__ == '__main__':
                     high_freq_inputs.append(input_tensor)
             low_freq_inputs = torch.cat(low_freq_inputs, dim=1)
             high_freq_inputs = torch.cat(high_freq_inputs, dim=1)
-            mask_train = mask_to_class_indices(data[20],label_mapping).long().to(device)
+            mask_train = mask_to_class_indices(data[20], label_mapping).long().to(
+                device,
+                non_blocking=True,
+            )
 
             optimizer.zero_grad()
             outputs_train_1, outputs_train_2,side1,side2 = model(low_freq_inputs, high_freq_inputs)
-            clear_device_cache(device)
     
          
            
@@ -439,8 +464,9 @@ if __name__ == '__main__':
 
             clear_device_cache(device)
 
-            with torch.no_grad():
+            with torch.inference_mode():
                 model.eval()
+                validation_metrics = StreamingValidationMetrics(classnum, group_size=10)
 
                 for i, data in enumerate(loaders['val']):
 
@@ -449,7 +475,11 @@ if __name__ == '__main__':
                     high_freq_inputs = []
 
                     for j in range(20):  # Sort by --selected_modal parameter
-                        input_tensor = data[j].unsqueeze(dim=1).to(device=device, dtype=torch.float32)
+                        input_tensor = data[j].unsqueeze(1).to(
+                            device=device,
+                            dtype=torch.float32,
+                            non_blocking=True,
+                        )
 
                         # Sort by --selected_modal parameter
                         if j in [0, 1, 2, 3]:
@@ -458,27 +488,24 @@ if __name__ == '__main__':
                             high_freq_inputs.append(input_tensor)
                     low_freq_inputs = torch.cat(low_freq_inputs, dim=1)
                     high_freq_inputs = torch.cat(high_freq_inputs, dim=1)
-                    mask_val = mask_to_class_indices(data[20],label_mapping).long().to(device)
+                    mask_val = mask_to_class_indices(data[20], label_mapping).long().to(
+                        device,
+                        non_blocking=True,
+                    )
 
-                    optimizer.zero_grad()
                     outputs_val_1, outputs_val_2,side1,side2 = model(low_freq_inputs, high_freq_inputs)
-                    clear_device_cache(device)
                     loss_val_sup_1 = criterion(outputs_val_1, mask_val)
                     loss_val_sup_2 = criterion(outputs_val_2, mask_val)
-                    outputs_val_1 = outputs_val_1.detach().cpu()
-                    outputs_val_2 = outputs_val_2.detach().cpu()
-                    mask_val = mask_val.detach().cpu()
-                    if i == 0:
-                        score_list_val_1 = outputs_val_1
-                        score_list_val_2 = outputs_val_2
-                        mask_list_val = mask_val
-                    else:
-                        score_list_val_1 = torch.cat((score_list_val_1, outputs_val_1), dim=0)
-                        score_list_val_2 = torch.cat((score_list_val_2, outputs_val_2), dim=0)
-                        mask_list_val = torch.cat((mask_list_val, mask_val), dim=0)
+                    pred_val_1 = torch.argmax(outputs_val_1, dim=1)
+                    pred_val_2 = torch.argmax(outputs_val_2, dim=1)
+                    validation_metrics.update(pred_val_1, pred_val_2, mask_val)
 
                     val_loss_sup_1 += loss_val_sup_1.item()
                     val_loss_sup_2 += loss_val_sup_2.item()
+
+                    del (low_freq_inputs, high_freq_inputs, mask_val,
+                         outputs_val_1, outputs_val_2, side1, side2,
+                         loss_val_sup_1, loss_val_sup_2, pred_val_1, pred_val_2)
 
                 wandb.log({"val_loss_sup1": val_loss_sup_1 / num_batches['val'],
                            "val_loss_sup2": val_loss_sup_2 / num_batches['val'],
@@ -491,10 +518,13 @@ if __name__ == '__main__':
 
                 val_epoch_loss_sup_1, val_epoch_loss_sup_2 = print_val_loss(val_loss_sup_1, val_loss_sup_2, num_batches,
                                                                             print_num, print_num_half)
-                val_eval_list_1, val_eval_list_2, val_m_dc_1, val_m_dc_2 = print_val_eval(classnum,
-                                                                                          score_list_val_1,
-                                                                                          score_list_val_2,
-                                                                                          mask_list_val, print_num_half)
+                val_eval_list_1, val_eval_list_2 = validation_metrics.compute()
+                val_eval_list_1, val_eval_list_2, val_m_dc_1, val_m_dc_2 = print_val_eval_metrics(
+                    classnum,
+                    val_eval_list_1,
+                    val_eval_list_2,
+                    print_num_half,
+                )
                 # Modify the indicators that need to be displayed in wandb log by yourself
                 # wandb.log({
                 #             "Val ET Dice 1": val_eval_list_1[0],
@@ -528,8 +558,7 @@ if __name__ == '__main__':
                 previous_best_metrics = list(best_val_eval_list)
                 best_val_eval_list, best_model, best_result = save_val_best_3d_m(classnum, best_model,
                                                                                best_val_eval_list, best_result, model,
-                                                                               model, score_list_val_1,
-                                                                               score_list_val_2, mask_list_val,
+                                                                               model,
                                                                                val_eval_list_1, val_eval_list_2,
                                                                                path_trained_models,)
                 if best_val_eval_list != previous_best_metrics:

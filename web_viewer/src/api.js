@@ -7,36 +7,6 @@ const subjectPath = (subjectId) =>
     .map((part) => encodeURIComponent(part))
     .join("/");
 
-const volumeWorkerCount = typeof Worker !== "undefined"
-  ? Math.max(1, Math.min(4, navigator.hardwareConcurrency || 4))
-  : 0;
-const volumeWorkers = Array.from({ length: volumeWorkerCount }, () =>
-  new Worker(new URL("./volumeWorker.js", import.meta.url), { type: "module" }),
-);
-const workerRequests = new Map();
-let nextWorkerRequestId = 1;
-let nextWorkerIndex = 0;
-
-volumeWorkers.forEach((worker) => {
-  worker.onmessage = (event) => {
-    const { id, error, ...payload } = event.data;
-    const request = workerRequests.get(id);
-    if (!request) return;
-    workerRequests.delete(id);
-    if (error) request.reject(new Error(error));
-    else request.resolve(payload);
-  };
-  worker.onerror = (event) => {
-    const error = new Error(event.message || "Volume worker failed.");
-    workerRequests.forEach((request, requestId) => {
-      if (request.worker === worker) {
-        request.reject(error);
-        workerRequests.delete(requestId);
-      }
-    });
-  };
-});
-
 async function parseResponse(response) {
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
@@ -110,59 +80,29 @@ export async function generateOutput(subjectId, checkpointId) {
   });
 }
 
-function parseNumberList(header) {
-  return header
-    .split(",")
-    .map((value) => Number(value.trim()))
-    .filter((value) => Number.isFinite(value));
-}
+export function resourceSource(subjectId, resource, revision = 0) {
+  const subject = subjectPath(subjectId);
+  let endpoint;
+  let name;
 
-async function decodeBinaryResponse(response) {
-  const shape = parseNumberList(response.headers.get("x-shape") || "");
-  const spacing = parseNumberList(response.headers.get("x-spacing") || "1,1,1");
-  const intensityRange = parseNumberList(
-    response.headers.get("x-intensity-range") || "0,1",
-  );
-  const dtype = response.headers.get("x-dtype") || "float32";
-  const buffer = await response.arrayBuffer();
-  const values = dtype === "uint8" ? new Uint8Array(buffer) : new Float32Array(buffer);
-  return { values, shape, spacing, intensityRange, dtype };
-}
-
-export async function fetchBinaryVolume(path) {
-  if (volumeWorkers.length) {
-    const workerResult = new Promise((resolve, reject) => {
-      const id = nextWorkerRequestId++;
-      const worker = volumeWorkers[nextWorkerIndex % volumeWorkers.length];
-      nextWorkerIndex += 1;
-      workerRequests.set(id, { resolve, reject, worker });
-      worker.postMessage({ id, path: apiPath(path) });
-    });
-    try {
-      return await workerResult;
-    } catch {
-      // A worker can be unavailable in an older Safari tab or after a hot
-      // reload. Keep the viewer usable by retrying through the normal fetch
-      // path instead of leaving a pane stuck with no explanation.
-    }
+  if (resource.kind === "volume") {
+    endpoint = `/subjects/${subject}/volumes/${encodeURIComponent(resource.modality)}/nifti`;
+    name = `${resource.modality.toLowerCase()}.nii.gz`;
+  } else if (resource.kind === "frequency") {
+    endpoint = `/subjects/${subject}/frequency/${encodeURIComponent(resource.modality)}/${encodeURIComponent(resource.band)}/nifti`;
+    name = `${resource.modality.toLowerCase()}_${resource.band.toLowerCase()}.nii.gz`;
+  } else if (resource.kind === "mask") {
+    endpoint = `/subjects/${subject}/masks/${encodeURIComponent(resource.maskKind)}/nifti`;
+    name = `${resource.maskKind}.nii.gz`;
+  } else {
+    throw new Error(`Unsupported viewer resource: ${resource.kind}`);
   }
-  const response = await fetchResponse(path);
-  return decodeBinaryResponse(response);
-}
 
-export async function fetchVolume(subjectId, modality) {
-  return fetchBinaryVolume(`/subjects/${subjectPath(subjectId)}/volumes/${modality}`);
-}
-
-export async function fetchFrequency(subjectId, modality, band) {
-  return fetchBinaryVolume(
-    `/subjects/${subjectPath(subjectId)}/frequency/${modality}/${band}`,
-  );
-}
-
-export async function fetchMask(subjectId, maskKind, checkpointId) {
-  const query = checkpointId ? `?checkpoint_id=${encodeURIComponent(checkpointId)}` : "";
-  return fetchBinaryVolume(
-    `/subjects/${subjectPath(subjectId)}/masks/${maskKind}${query}`,
-  );
+  const query = new URLSearchParams();
+  if (resource.maskKind === "output" && resource.checkpointId) {
+    query.set("checkpoint_id", resource.checkpointId);
+  }
+  if (resource.maskKind === "output" && revision) query.set("revision", String(revision));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return { url: apiPath(`${endpoint}${suffix}`), name };
 }

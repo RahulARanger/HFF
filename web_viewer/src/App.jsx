@@ -1,15 +1,13 @@
-import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
 const ViewerPane = lazy(() => import("./components/ViewerPane.jsx"));
 import MonitorView from "./components/MonitorView.jsx";
 import {
   fetchCheckpoints,
   fetchFolders,
-  fetchFrequency,
-  fetchMask,
   fetchMetadata,
-  fetchVolume,
   generateOutput,
+  resourceSource,
 } from "./api.js";
 
 const MODALITIES = ["FLAIR", "T1", "T1CE", "T2"];
@@ -26,23 +24,13 @@ const AXIS_OPTIONS = [
 ];
 const MIN_2D_ZOOM = 1;
 const MAX_2D_ZOOM = 6;
-
-function resourceKey(resource) {
-  return [resource.kind, resource.modality, resource.band || "", resource.maskKind || "", resource.checkpointId || ""].join(":");
-}
+const MIN_VOLUME_SCALE = 0.55;
+const MAX_VOLUME_SCALE = 2.5;
 
 function selectionErrorMessage(error) {
   return /not found|404|not a scan folder|missing .* scan/i.test(error?.message || "")
     ? "Please retry your selection."
     : error.message;
-}
-
-function scaleCameraPosition(cameraState, factor) {
-  if (!cameraState) return cameraState;
-  const position = cameraState.position.map((value, index) => (
-    cameraState.focalPoint[index] + (value - cameraState.focalPoint[index]) * factor
-  ));
-  return { ...cameraState, position };
 }
 
 function buildPanes(mode, selectedScan, frequencyBand) {
@@ -220,22 +208,16 @@ export default function App() {
   const [frequencyBand, setFrequencyBand] = useState("H1");
   const [checkpointId, setCheckpointId] = useState("");
   const [renderingMode, setRenderingMode] = useState("volume");
-  const [volumeMode, setVolumeMode] = useState("MIP");
   const [zoom, setZoom] = useState(1);
-  const [cameraState, setCameraState] = useState(null);
+  const [volumeScale, setVolumeScale] = useState(1);
   const [sliceAxis, setSliceAxis] = useState("axial");
   const [sliceIndex, setSliceIndex] = useState(0);
-  const [resources, setResources] = useState({});
-  const [renderedPaneCount, setRenderedPaneCount] = useState(0);
-  const [loadingResources, setLoadingResources] = useState(false);
-  const [resourceErrors, setResourceErrors] = useState({});
   const [loadingSubjects, setLoadingSubjects] = useState(false);
   const [appError, setAppError] = useState("");
   const [checkpointError, setCheckpointError] = useState("");
-  const [resourceProgress, setResourceProgress] = useState({ completed: 0, total: 0 });
   const [startupAttempt, setStartupAttempt] = useState(0);
   const [generating, setGenerating] = useState(false);
-  const cacheRef = useRef(new Map());
+  const [outputRevision, setOutputRevision] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -274,84 +256,20 @@ export default function App() {
       .finally(() => setLoadingSubjects(false));
   }, [subjectId]);
 
-  // Keep the sidebar and workspace controls urgent while VTK tears down and
-  // rebuilds the expensive multi-pane scene in the background.
-  const deferredMode = useDeferredValue(mode);
-  const panes = useMemo(() => buildPanes(deferredMode, selectedScan, frequencyBand), [deferredMode, selectedScan, frequencyBand]);
-
-  useEffect(() => {
-    setCameraState(null);
-  }, [subjectId, mode, renderingMode]);
-
-  const loadResource = useCallback(async (resource) => {
-    const key = resourceKey(resource);
-    if (cacheRef.current.has(`${subjectId}:${key}`)) return cacheRef.current.get(`${subjectId}:${key}`);
-    let loaded;
-    if (resource.kind === "volume") loaded = await fetchVolume(subjectId, resource.modality);
-    if (resource.kind === "frequency") loaded = await fetchFrequency(subjectId, resource.modality, resource.band);
-    if (resource.kind === "mask") loaded = await fetchMask(subjectId, resource.maskKind, resource.checkpointId);
-    cacheRef.current.set(`${subjectId}:${key}`, loaded);
-    return loaded;
-  }, [subjectId]);
-
-  useEffect(() => {
-    if (!subjectId || !panes.length || !renderedPaneCount) return;
-    const allResources = panes.flatMap((pane) => [pane.volume, pane.mask, pane.maskOnly]).filter(Boolean).map((resource) => ({ ...resource, checkpointId: resource.maskKind === "output" ? checkpointId : undefined }));
-    const uniqueResources = Array.from(new Map(allResources.map((resource) => [resourceKey(resource), resource])).values());
-    let cancelled = false;
-    setLoadingResources(true);
-    setResourceProgress({ completed: 0, total: uniqueResources.length });
-    if (renderedPaneCount === 1) setResourceErrors({});
-    const loadOneResource = async (resource) => {
-      const key = resourceKey(resource);
-      try {
-        const loaded = await loadResource(resource);
-        if (!cancelled) setResources((current) => ({ ...current, [key]: loaded }));
-      } catch (error) {
-        if (!cancelled) setResourceErrors((current) => ({ ...current, [key]: selectionErrorMessage(error) }));
-      } finally {
-        if (!cancelled) setResourceProgress((current) => ({ ...current, completed: current.completed + 1 }));
-      }
-    };
-
-    (async () => {
-      // Fetch and decode all resources in the worker pool while the complete
-      // pane grid remains visible to the user.
-      let nextResourceIndex = 0;
-      const loadWorker = async () => {
-        while (!cancelled) {
-          const resource = uniqueResources[nextResourceIndex];
-          nextResourceIndex += 1;
-          if (!resource) return;
-          await loadOneResource(resource);
-        }
-      };
-
-      // Keep the UI responsive while two requests at a time warm the backend
-      // and browser caches. The full pane grid remains visible while loading.
-      const workerCount = Math.min(2, uniqueResources.length);
-      await Promise.all(Array.from({ length: workerCount }, loadWorker));
-      if (!cancelled) {
-        setLoadingResources(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [subjectId, panes, checkpointId, loadResource, renderedPaneCount]);
-
-  useEffect(() => {
-    // Keep every requested view visible while its data loads. This makes the
-    // workspace map stable and prevents users from mistaking progressive
-    // renderer mounting for missing views.
-    setRenderedPaneCount(panes.length);
-  }, [panes]);
+  const panes = useMemo(() => buildPanes(mode, selectedScan, frequencyBand), [mode, selectedScan, frequencyBand]);
 
   const resourceFor = useCallback((resource) => {
-    if (!resource) return null;
+    if (!resource || !subjectId) return null;
     const actualResource = { ...resource, checkpointId: resource.maskKind === "output" ? checkpointId : undefined };
-    return resources[resourceKey(actualResource)] || null;
-  }, [resources, checkpointId]);
+    const shape = actualResource.kind === "mask"
+      ? metadata?.segmentation?.shape || metadata?.scans?.[selectedScan]?.shape
+      : metadata?.scans?.[actualResource.modality]?.shape;
+    return {
+      ...actualResource,
+      ...resourceSource(subjectId, actualResource, outputRevision),
+      shape,
+    };
+  }, [subjectId, checkpointId, metadata, selectedScan, outputRevision]);
 
   const sliceMaximum = metadata?.scans?.[selectedScan]?.shape?.[{ axial: 0, coronal: 1, sagittal: 2 }[sliceAxis]] - 1 || 0;
   useEffect(() => {
@@ -364,10 +282,7 @@ export default function App() {
     setAppError("");
     try {
       await generateOutput(subjectId, checkpointId);
-      const outputResource = { kind: "mask", maskKind: "output", checkpointId };
-      const output = await fetchMask(subjectId, "output", checkpointId);
-      cacheRef.current.set(`${subjectId}:${resourceKey(outputResource)}`, output);
-      setResources((current) => ({ ...current, [resourceKey(outputResource)]: output }));
+      setOutputRevision((current) => current + 1);
     } catch (error) {
       setAppError(error.message);
     } finally {
@@ -375,23 +290,19 @@ export default function App() {
     }
   };
 
-  const status = appError ? "error" : loadingSubjects || loadingResources ? "loading" : "ready";
+  const status = appError ? "error" : loadingSubjects ? "loading" : "ready";
   const statusLabel = appError
     ? "Viewer error"
     : loadingSubjects
       ? "Loading dataset catalog"
-      : loadingResources
-        ? `Loading views ${resourceProgress.completed}/${resourceProgress.total}`
-        : "Viewer ready";
+      : "Viewer ready";
 
   const retrySelection = () => {
     setSubjectId("");
     setSelectedSubject(null);
     setMetadata(null);
-    setResources({});
-    setResourceErrors({});
     setAppError("");
-    cacheRef.current.clear();
+    setOutputRevision(0);
   };
 
   const adjustZoom = useCallback((direction) => {
@@ -402,12 +313,15 @@ export default function App() {
   }, []);
 
   const adjust3DZoom = useCallback((direction) => {
-    setCameraState((current) => scaleCameraPosition(current, direction > 0 ? 1 / 1.2 : 1.2));
+    setVolumeScale((current) => {
+      const next = direction > 0 ? current * 1.2 : current / 1.2;
+      return Math.min(MAX_VOLUME_SCALE, Math.max(MIN_VOLUME_SCALE, next));
+    });
   }, []);
 
   const resetView = () => {
     setZoom(MIN_2D_ZOOM);
-    setCameraState(null);
+    setVolumeScale(1);
     setSliceIndex(Math.floor(sliceMaximum / 2));
   };
 
@@ -442,9 +356,7 @@ export default function App() {
                 onChange={(folderPath) => {
                   setAppError("");
                   setMetadata(null);
-                  setResources({});
-                  setResourceErrors({});
-                  setLoadingResources(false);
+                  setOutputRevision(0);
                   setSubjectId(folderPath);
                   setSelectedSubject({ path: folderPath === "." ? "Dataset root" : folderPath, label: folderPath.split("/").at(-1) || "Dataset root" });
                 }}
@@ -494,7 +406,6 @@ export default function App() {
           <div className="breadcrumb"><span>Research workspace</span><span className="crumb-divider">/</span><strong>{mode === "input" ? "Input analysis" : mode === "frequency" ? "Frequency decomposition" : mode === "monitor" ? "Training monitor" : "Output analysis"}</strong></div>
           {mode !== "monitor" && <div className="topbar-actions">
             <label className="compact-control"><span>Render</span><select value={renderingMode} onChange={(event) => setRenderingMode(event.target.value)}><option value="volume">3D volume</option><option value="slice">2D slice</option></select></label>
-            <label className="compact-control"><span>Blend</span><select value={volumeMode} onChange={(event) => setVolumeMode(event.target.value)} disabled={renderingMode === "slice"}><option value="MIP">MIP</option><option value="Composite">Composite</option></select></label>
           </div>}
         </header>
 
@@ -504,9 +415,9 @@ export default function App() {
           <div className="slice-control"><span className="slice-value">{sliceIndex + 1}<span>/</span>{sliceMaximum + 1}</span><input type="range" min="0" max={sliceMaximum} value={sliceIndex} onChange={(event) => setSliceIndex(Number(event.target.value))} disabled={renderingMode !== "slice" || !metadata} /></div>
           <div className="zoom-control" aria-label={renderingMode === "slice" ? "Linked 2D zoom" : "Linked 3D zoom"}>
             <span className="toolbar-label">Zoom</span>
-            <button aria-label="Zoom out" onClick={() => (renderingMode === "slice" ? adjustZoom(-1) : adjust3DZoom(-1))} disabled={renderingMode === "slice" ? zoom <= MIN_2D_ZOOM : !cameraState}>−</button>
-            <span className="zoom-value">{renderingMode === "slice" ? `${Math.round(zoom * 100)}%` : "3D"}</span>
-            <button aria-label="Zoom in" onClick={() => (renderingMode === "slice" ? adjustZoom(1) : adjust3DZoom(1))} disabled={renderingMode === "slice" ? zoom >= MAX_2D_ZOOM : !cameraState}>+</button>
+            <button aria-label="Zoom out" onClick={() => (renderingMode === "slice" ? adjustZoom(-1) : adjust3DZoom(-1))} disabled={renderingMode === "slice" ? zoom <= MIN_2D_ZOOM : volumeScale <= MIN_VOLUME_SCALE}>−</button>
+            <span className="zoom-value">{renderingMode === "slice" ? `${Math.round(zoom * 100)}%` : `${Math.round(volumeScale * 100)}%`}</span>
+            <button aria-label="Zoom in" onClick={() => (renderingMode === "slice" ? adjustZoom(1) : adjust3DZoom(1))} disabled={renderingMode === "slice" ? zoom >= MAX_2D_ZOOM : volumeScale >= MAX_VOLUME_SCALE}>+</button>
           </div>
           <button className="reset-button" onClick={resetView}>Reset view</button>
         </div>
@@ -517,14 +428,13 @@ export default function App() {
             <button className="alert-action" onClick={retrySelection}>Retry selection</button>
           </div>
         )}
-        <div className="pane-grid" aria-busy={renderedPaneCount < panes.length}>
-          {panes.slice(0, renderedPaneCount).map((pane) => {
+        <div className="pane-grid" aria-busy={loadingSubjects}>
+          {panes.map((pane) => {
             const volume = resourceFor(pane.volume);
             const mask = resourceFor(pane.mask || pane.maskOnly);
-            const resourceError = resourceErrors[resourceKey({ ...(pane.mask || pane.maskOnly), checkpointId: (pane.mask || pane.maskOnly)?.maskKind === "output" ? checkpointId : undefined })];
             return (
               <Suspense key={pane.id} fallback={<section className="viewer-pane pane-suspense"><div className="pane-loading"><span className="spinner" /> Loading renderer</div></section>}>
-                <ViewerPane title={pane.title} volume={volume} mask={mask} renderingMode={renderingMode} volumeMode={volumeMode} sliceAxis={sliceAxis} sliceIndex={sliceIndex} zoom={zoom} onZoom={adjustZoom} cameraState={cameraState} onCameraChange={setCameraState} loading={loadingResources && !volume && !mask} error={resourceError} />
+                <ViewerPane title={pane.title} volume={volume} mask={mask} renderingMode={renderingMode} sliceAxis={sliceAxis} sliceIndex={sliceIndex} zoom={zoom} volumeScale={volumeScale} onZoom={adjustZoom} onSliceChange={setSliceIndex} />
               </Suspense>
             );
           })}
@@ -535,7 +445,7 @@ export default function App() {
           <span>Scan: <strong>{selectedScan}</strong></span>
           <span>Dimensions: <strong>{metadata?.scans?.[selectedScan]?.shape?.slice().reverse().join(" × ") || "—"}</strong></span>
           <span>Voxel: <strong>{metadata?.scans?.[selectedScan]?.spacing?.map((value) => value.toFixed(1)).join(" × ") || "—"} mm</strong></span>
-          <span>Rendering: <strong>{renderingMode === "slice" ? "2D slice" : volumeMode}</strong></span>
+          <span>Rendering: <strong>{renderingMode === "slice" ? "2D multiplanar" : "3D volume"}</strong></span>
           <span>Model: <strong>HFF-Net</strong></span>
           <span className="status-ready"><StatusDot state={status} /> {status === "ready" ? "Ready" : status === "loading" ? "Loading" : "Error"}</span>
         </footer>
