@@ -122,6 +122,14 @@ def reference_spacing(path: Path) -> tuple[float, float, float]:
     return tuple(float(value) for value in sitk.ReadImage(str(path)).GetSpacing())
 
 
+def image_header(path: Path) -> sitk.ImageFileReader:
+    """Read only NIfTI header information for fast folder selection."""
+    reader = sitk.ImageFileReader()
+    reader.SetFileName(str(path))
+    reader.ReadImageInformation()
+    return reader
+
+
 def read_jsonl_tail(path: Path, limit: int) -> list[dict[str, object]]:
     """Read only the newest monitor samples so polling stays cheap for long runs."""
     samples: deque[dict[str, object]] = deque(maxlen=limit)
@@ -260,6 +268,12 @@ def monitor_record(
     peak_ram_rss = summary.get("peak_ram_rss_bytes") or monitor_value_peak(samples, "ram_rss_bytes")
     peak_ram_uss = summary.get("peak_ram_uss_bytes") or monitor_value_peak(samples, "ram_uss_bytes")
     peak_gpu = summary.get("peak_gpu_memory_bytes") or monitor_value_peak(samples, "gpu_memory_bytes")
+    cpu_values = [
+        float(sample["cpu_utilization_percent"])
+        for sample in samples
+        if isinstance(sample.get("cpu_utilization_percent"), (int, float))
+    ]
+    peak_cpu = summary.get("peak_cpu_utilization_percent") or (max(cpu_values) if cpu_values else None)
     progress = training_progress(log_path, manifest, include_history=include_training_history)
     return {
         "id": log_path.relative_to(results_root).as_posix(),
@@ -282,6 +296,7 @@ def monitor_record(
             "ram_rss_bytes": peak_ram_rss,
             "ram_uss_bytes": peak_ram_uss,
             "gpu_memory_bytes": peak_gpu,
+            "cpu_utilization_percent": peak_cpu,
         },
     }
 
@@ -346,11 +361,13 @@ def create_app(dataset_root: Path = DEFAULT_DATA_ROOT, results_root: Path = DEFA
         return {
             "root": root.name,
             "path": relative_path,
+            "selectable": bool(subject_files(candidate)[0]),
             "folders": [
                 {
                     "id": child.relative_to(root).as_posix(),
                     "label": child.name,
                     "path": child.relative_to(root).as_posix(),
+                    "selectable": bool(subject_files(child)[0]),
                 }
                 for child in child_folders
             ],
@@ -406,21 +423,22 @@ def create_app(dataset_root: Path = DEFAULT_DATA_ROOT, results_root: Path = DEFA
         scan_metadata: dict[str, object] = {}
         for path in scans:
             modality = path.name.rsplit("_", 1)[-1].split(".", 1)[0].upper()
-            actual = load_volume(path)
+            # Metadata must stay header-only. Loading full 3D arrays here made
+            # folder selection block before the viewer could show any state.
+            image = image_header(path)
             available_bands = {
                 band: find_frequency_file(path, band) is not None
                 for band in ("L", "H1", "H2", "H3", "H4")
             }
             scan_metadata[modality] = {
-                "shape": list(actual.shape),
-                "spacing": list(reference_spacing(path)),
-                "contrast_limits": list(contrast_limits(actual)),
+                "shape": list(reversed(image.GetSize())),
+                "spacing": list(reversed(image.GetSpacing())),
                 "frequency": available_bands,
             }
 
         mask_shape = None
         if segmentation is not None:
-            mask_shape = list(load_volume(segmentation).shape)
+            mask_shape = list(reversed(image_header(segmentation).GetSize()))
         return {
             "id": subject_id,
             "label": subject_dir.name,

@@ -1,4 +1,4 @@
-"""Process-scoped CPU and accelerator memory monitoring for training runs.
+"""Process-scoped CPU and accelerator telemetry for training runs.
 
 The monitor is intentionally owned by ``train.py`` rather than scanning the
 whole machine.  It samples the training process and its descendants, which
@@ -7,7 +7,8 @@ the experiment.
 
 CUDA uses NVIDIA's NVML bindings (provided by ``nvidia-ml-py``).  MPS uses the
 memory counters exposed by PyTorch because Apple does not provide an NVML-like
-per-process API for Metal devices.
+per-process API for Metal devices. GPU utilization is recorded only when NVML
+can return it for the tracked process tree.
 """
 
 from __future__ import annotations

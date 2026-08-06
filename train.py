@@ -86,6 +86,16 @@ def _json_metrics(values):
     return result
 
 
+def _gradient_norm(model):
+    """Return the L2 norm of gradients without changing optimizer state."""
+    squared_norm = 0.0
+    for parameter in model.parameters():
+        if parameter.grad is not None:
+            gradient_norm = parameter.grad.detach().float().norm(2).item()
+            squared_norm += float(gradient_norm) ** 2
+    return float(squared_norm ** 0.5)
+
+
 def save_training_metrics(path, args, history, best_result, best_metrics, best_epoch):
     """Persist the epoch history and best validation metrics for an experiment."""
     payload = {
@@ -288,6 +298,8 @@ if __name__ == '__main__':
     for epoch in range(args.num_epochs):
 
         count_iter += 1
+        epoch_started_at = time.perf_counter()
+        epoch_learning_rate = float(optimizer.param_groups[0]['lr'])
         if (count_iter - 1) % args.display_iter == 0:
             begin_time = time.time()
 
@@ -307,6 +319,11 @@ if __name__ == '__main__':
         train_loss_side4=0.0
 
         train_loss = 0.0
+        train_data_wait_seconds = 0.0
+        train_compute_seconds = 0.0
+        train_samples_processed = 0
+        last_gradient_norm = None
+        non_finite_batches = 0
         val_loss_sup_1 = 0.0
         val_loss_sup_2 = 0.0
 
@@ -325,8 +342,13 @@ if __name__ == '__main__':
                         param[important_weights] = model.laplacian_target[important_weights]
 
 
-        for i, data in enumerate(tqdm(loaders['train'])):
-     
+        train_iterator = iter(tqdm(loaders['train']))
+        for i in range(num_batches['train_sup']):
+            data_wait_started_at = time.perf_counter()
+            data = next(train_iterator)
+            train_data_wait_seconds += time.perf_counter() - data_wait_started_at
+            train_compute_started_at = time.perf_counter()
+            train_samples_processed += int(data[0].shape[0])
 
             low_freq_inputs = []
             high_freq_inputs = []
@@ -362,7 +384,8 @@ if __name__ == '__main__':
             loss_train_unsup = loss_train_unsup * unsup_weight
 
             loss_train = loss_train_sup1 + loss_train_sup2 + loss_train_unsup+loss_train_side1+loss_train_side2+reg_loss
-   
+            if not np.isfinite(loss_train.detach().item()):
+                non_finite_batches += 1
 
             loss_train.backward()
 
@@ -374,7 +397,10 @@ if __name__ == '__main__':
                             param.grad[important_weights] = 0
 
 
+            if i == num_batches['train_sup'] - 1:
+                last_gradient_norm = _gradient_norm(model)
             optimizer.step()
+            train_compute_seconds += time.perf_counter() - train_compute_started_at
 
 
 
@@ -520,6 +546,16 @@ if __name__ == '__main__':
                     'validation_loss_branch_2': val_loss_sup_2 / num_batches['val'],
                     'validation_metrics_branch_1': _json_metrics(val_eval_list_1),
                     'validation_metrics_branch_2': _json_metrics(val_eval_list_2),
+                    'learning_rate': epoch_learning_rate,
+                    'epoch_seconds': time.perf_counter() - epoch_started_at,
+                    'train_data_wait_seconds': train_data_wait_seconds,
+                    'train_compute_seconds': train_compute_seconds,
+                    'train_samples_per_second': (
+                        train_samples_processed / (train_data_wait_seconds + train_compute_seconds)
+                        if train_data_wait_seconds + train_compute_seconds > 0 else None
+                    ),
+                    'gradient_norm_last_step': last_gradient_norm,
+                    'non_finite_batches': non_finite_batches,
                 })
                 save_training_metrics(
                     metrics_path,

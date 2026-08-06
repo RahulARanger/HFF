@@ -199,7 +199,7 @@ input[type="range"] { width: 100%; accent-color: #43b7e8; }
 .resource-lane-axis { position: absolute; top: 0; bottom: 4px; left: 0; display: flex; flex-direction: column; justify-content: space-between; color: #718899; font-size: 8px; font-variant-numeric: tabular-nums; }
 .resource-lane-svg { display: block; width: 100%; height: 74px; }
 .resource-chart-time-axis { display: flex; justify-content: space-between; padding: 1px 0 0 49px; color: #607989; font-size: 8px; font-variant-numeric: tabular-nums; }
-.resource-lane-empty { min-height: 74px; }
+.resource-lane-empty { min-height: 0; padding-bottom: 2px; }
 .resource-lane-empty .resource-lane-header { margin-bottom: 0; }
 .resource-chart-empty { position: static; padding: 56px 0; text-align: center; }
 .epoch-progress-card { margin-top: 10px; padding: 13px; border: 1px solid #2a4351; background: #101c26; }
