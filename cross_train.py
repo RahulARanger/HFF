@@ -66,6 +66,21 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         ),
     )
     parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Existing prepared experiment directory to reuse. This is required "
+            "when running one fold from a prepared PBS cross-validation run."
+        ),
+    )
+    parser.add_argument(
+        "--fold-index",
+        type=int,
+        default=None,
+        help="Run only this one-based fold; omit to run every fold sequentially.",
+    )
+    parser.add_argument(
         "--python",
         type=str,
         default=sys.executable,
@@ -79,6 +94,8 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     args, train_args = parser.parse_known_args()
     if args.resource_monitor_interval <= 0:
         parser.error("--resource-monitor-interval must be positive.")
+    if args.run_dir is not None and args.run_name is not None:
+        parser.error("--run-dir and --run-name cannot be used together.")
     if any(argument == "--parallel-folds" or argument.startswith("--parallel-folds=") for argument in train_args):
         parser.error("--parallel-folds has been removed; cross-validation folds always run sequentially.")
     # argparse retains the ``--`` separator in unknown arguments.  It is only
@@ -167,6 +184,88 @@ def create_run_directory(results_root: Path, requested_name: str | None) -> Path
     return run_dir
 
 
+def load_prepared_run(run_dir: Path) -> tuple[Path, dict[str, Any]]:
+    """Load an existing run created by ``--dry-run`` without changing its splits."""
+    run_dir = run_dir.expanduser().resolve()
+    manifest_path = run_dir / "cross_validation_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"Prepared run manifest does not exist: {manifest_path}. "
+            "Run cross_train.py with --dry-run first."
+        )
+    with manifest_path.open(encoding="utf-8") as manifest_file:
+        manifest = json.load(manifest_file)
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("folds"), list):
+        raise ValueError(f"Invalid cross-validation manifest: {manifest_path}")
+    return run_dir, manifest
+
+
+def prepare_run(
+    args: argparse.Namespace,
+    train_args: list[str],
+    patients: Sequence[Path],
+    validation_folds: list[list[Path]],
+) -> tuple[Path, Path, dict[str, Any], list[tuple[int, Path, Path, Path]]]:
+    """Create immutable split artifacts and the initial run manifest."""
+    results_root = args.results_dir.expanduser().resolve()
+    results_dir = create_run_directory(results_root, args.run_name)
+    split_dir = results_dir / "splits"
+
+    manifest: dict[str, Any] = {
+        "dataset_dir": str(args.dataset_dir.expanduser().resolve()),
+        "patient_count": len(patients),
+        "fold_count": args.folds,
+        "split_seed": args.seed,
+        "epochs_per_fold": args.epochs,
+        "resource_monitor_interval_seconds": args.resource_monitor_interval,
+        "forwarded_train_arguments": train_args,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "status": "prepared" if args.dry_run else "running",
+        "folds": [],
+    }
+    fold_jobs: list[tuple[int, Path, Path, Path]] = []
+    for fold_index, validation_patients in enumerate(validation_folds, start=1):
+        validation_set = set(validation_patients)
+        training_patients = [patient for patient in patients if patient not in validation_set]
+        train_list = split_dir / f"fold_{fold_index}_train.txt"
+        validation_list = split_dir / f"fold_{fold_index}_validation.txt"
+        write_patient_list(train_list, training_patients)
+        write_patient_list(validation_list, validation_patients)
+        fold_dir = results_dir / f"fold_{fold_index}"
+        manifest["folds"].append(
+            {
+                "fold": fold_index,
+                "train_patient_count": len(training_patients),
+                "validation_patient_count": len(validation_patients),
+                "train_list": str(train_list),
+                "validation_list": str(validation_list),
+                "output_dir": str(fold_dir),
+                "resource_monitoring": "enabled",
+                "status": "pending",
+            }
+        )
+        fold_jobs.append((fold_index, train_list, validation_list, fold_dir))
+    return results_dir, split_dir, manifest, fold_jobs
+
+
+def jobs_from_manifest(manifest: dict[str, Any]) -> list[tuple[int, Path, Path, Path]]:
+    """Return fold paths recorded in a prepared manifest."""
+    jobs = []
+    for fold in manifest["folds"]:
+        try:
+            jobs.append(
+                (
+                    int(fold["fold"]),
+                    Path(fold["train_list"]),
+                    Path(fold["validation_list"]),
+                    Path(fold["output_dir"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("Invalid fold entry in cross-validation manifest.") from error
+    return jobs
+
+
 def read_fold_metrics(fold_dir: Path) -> dict[str, Any]:
     metrics_files = sorted(fold_dir.rglob("training_metrics.json"))
     if len(metrics_files) != 1:
@@ -236,55 +335,46 @@ def main() -> int:
     if args.epochs < 1:
         raise ValueError("--epochs must be positive.")
 
-    patients = find_patient_directories(args.dataset_dir)
-    validation_folds = split_patients(patients, args.folds, args.seed)
-    results_root = args.results_dir.expanduser().resolve()
-    results_dir = create_run_directory(results_root, args.run_name)
-    split_dir = results_dir / "splits"
-
-    manifest: dict[str, Any] = {
-        "dataset_dir": str(args.dataset_dir.expanduser().resolve()),
-        "patient_count": len(patients),
-        "fold_count": args.folds,
-        "split_seed": args.seed,
-        "epochs_per_fold": args.epochs,
-        "resource_monitor_interval_seconds": args.resource_monitor_interval,
-        "forwarded_train_arguments": train_args,
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "status": "prepared" if args.dry_run else "running",
-        "folds": [],
-    }
-    fold_jobs: list[tuple[int, Path, Path, Path]] = []
-    for fold_index, validation_patients in enumerate(validation_folds, start=1):
-        validation_set = set(validation_patients)
-        training_patients = [patient for patient in patients if patient not in validation_set]
-        train_list = split_dir / f"fold_{fold_index}_train.txt"
-        validation_list = split_dir / f"fold_{fold_index}_validation.txt"
-        write_patient_list(train_list, training_patients)
-        write_patient_list(validation_list, validation_patients)
-        fold_dir = results_dir / f"fold_{fold_index}"
-        manifest["folds"].append(
-            {
-                "fold": fold_index,
-                "train_patient_count": len(training_patients),
-                "validation_patient_count": len(validation_patients),
-                "train_list": str(train_list),
-                "validation_list": str(validation_list),
-                "output_dir": str(fold_dir),
-                "resource_monitoring": "enabled",
-                "status": "pending",
-            }
+    if args.run_dir is None:
+        patients = find_patient_directories(args.dataset_dir)
+        validation_folds = split_patients(patients, args.folds, args.seed)
+        results_dir, _, manifest, fold_jobs = prepare_run(args, train_args, patients, validation_folds)
+        manifest_path = results_dir / "cross_validation_manifest.json"
+        write_json(manifest_path, manifest)
+        LOGGER.info(
+            "Created %d deterministic folds for %d patients in new experiment directory %s",
+            args.folds,
+            len(patients),
+            results_dir,
         )
-        fold_jobs.append((fold_index, train_list, validation_list, fold_dir))
+    else:
+        if args.dry_run:
+            raise ValueError("--dry-run cannot be combined with --run-dir.")
+        results_dir, manifest = load_prepared_run(args.run_dir)
+        manifest_path = results_dir / "cross_validation_manifest.json"
+        if manifest.get("fold_count") != args.folds:
+            raise ValueError(
+                f"Prepared run has {manifest.get('fold_count')} folds, but --folds={args.folds} was supplied."
+            )
+        if manifest.get("split_seed") != args.seed:
+            raise ValueError(
+                f"Prepared run uses split seed {manifest.get('split_seed')}, but --seed={args.seed} was supplied."
+            )
+        if manifest.get("epochs_per_fold") != args.epochs:
+            raise ValueError(
+                f"Prepared run uses {manifest.get('epochs_per_fold')} epochs, but --epochs={args.epochs} was supplied."
+            )
+        if train_args != manifest.get("forwarded_train_arguments", []):
+            raise ValueError("Forwarded train.py arguments do not match the prepared run manifest.")
+        fold_jobs = jobs_from_manifest(manifest)
+        LOGGER.info("Reusing prepared cross-validation run %s", results_dir)
 
-    manifest_path = results_dir / "cross_validation_manifest.json"
-    write_json(manifest_path, manifest)
-    LOGGER.info(
-        "Created %d deterministic folds for %d patients in new experiment directory %s",
-        args.folds,
-        len(patients),
-        results_dir,
-    )
+    if args.fold_index is not None:
+        if not 1 <= args.fold_index <= args.folds:
+            raise ValueError(f"--fold-index must be between 1 and {args.folds}.")
+        fold_jobs = [job for job in fold_jobs if job[0] == args.fold_index]
+        if not fold_jobs:
+            raise ValueError(f"Fold {args.fold_index} is missing from the cross-validation manifest.")
 
     if args.dry_run:
         return 0
@@ -292,8 +382,13 @@ def main() -> int:
     fold_results: list[dict[str, Any]] = []
     train_script = Path(__file__).with_name("train.py")
     for fold_index, train_list, validation_list, fold_dir in fold_jobs:
-        manifest["folds"][fold_index - 1]["status"] = "running"
-        manifest["folds"][fold_index - 1]["started_at_utc"] = datetime.now(timezone.utc).isoformat()
+        manifest_fold = manifest["folds"][fold_index - 1]
+        if manifest_fold.get("status") == "completed":
+            raise RuntimeError(
+                f"Fold {fold_index} is already completed in {results_dir}; refusing to overwrite its results."
+            )
+        manifest_fold["status"] = "running"
+        manifest_fold["started_at_utc"] = datetime.now(timezone.utc).isoformat()
         write_json(manifest_path, manifest)
 
         try:
@@ -317,12 +412,36 @@ def main() -> int:
             raise
 
         fold_results.append({"fold": fold_index, "metrics": fold_metrics})
-        manifest["folds"][fold_index - 1]["resource_summary_files"] = [
+        manifest_fold["resource_summary_files"] = [
             str(path) for path in resource_summary_files
         ]
-        manifest["folds"][fold_index - 1]["status"] = "completed"
-        manifest["folds"][fold_index - 1]["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        manifest_fold["status"] = "completed"
+        manifest_fold["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
         write_json(manifest_path, manifest)
+
+    if args.fold_index is not None:
+        completed = all(fold.get("status") == "completed" for fold in manifest["folds"])
+        manifest["status"] = "completed" if completed else "in_progress"
+        if completed:
+            completed_results = [
+                {
+                    "fold": int(fold["fold"]),
+                    "metrics": read_fold_metrics(Path(fold["output_dir"])),
+                }
+                for fold in manifest["folds"]
+            ]
+            write_json(
+                results_dir / "cross_validation_metrics.json",
+                {
+                    "manifest": str(manifest_path),
+                    "fold_results": completed_results,
+                    "best_validation_metric_summary": summarise_metrics(completed_results),
+                },
+            )
+            manifest["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        write_json(manifest_path, manifest)
+        LOGGER.info("Fold %d completed in %s", args.fold_index, results_dir)
+        return 0
 
     summary = {
         "manifest": str(manifest_path),

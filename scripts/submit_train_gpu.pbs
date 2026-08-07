@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-#PBS -N hff_cross_train
+#PBS -N hff_cross_train_fold
 #PBS -q workq
 # Validation is streamed in bounded groups; 12 CPU cores are sufficient for
 # the reduced DataLoader worker count and leave the 64 GB RAM allocation clear.
 #PBS -l select=1:ncpus=12:mem=64gb:ngpus=1
-#PBS -l walltime=24:00:00
+#PBS -l walltime=48:00:00
 #PBS -j oe
 
 set -euo pipefail
@@ -20,7 +20,8 @@ usage() {
   cat <<'USAGE'
 Usage:
   qsub -v HFF_GPU_DEVICE=<device> -- scripts/submit_train_gpu.pbs \
-    [--gpu-device <device>] <cross_train.py options> -- <train.py options>
+    [--gpu-device <device>] <dataset> --fold-index <1..N> --run-dir <path> \
+    <cross_train.py options> -- <train.py options>
 
 The device may be a physical GPU index (for example, 6) or a MIG UUID
 (for example, MIG-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx). It is exposed to
@@ -28,13 +29,14 @@ the process through CUDA_VISIBLE_DEVICES, where it becomes logical cuda:0.
 
 Examples:
   qsub -v HFF_GPU_DEVICE=6 -- scripts/submit_train_gpu.pbs \
-    dataset/brats2019/splits/explore \
-    --run-name explore_brats19 --epochs 1 -- \
+    dataset/brats2019/splits/explore --fold-index 1 \
+    --run-dir result/cross_validation/explore_brats19 --epochs 350 -- \
     --dataset_name brats19 --class_type all
 
   qsub -- scripts/submit_train_gpu.pbs \
     --gpu-device MIG-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
-    dataset/brats2019/splits/explore --run-name explore_brats19 -- \
+    dataset/brats2019/splits/explore --fold-index 1 \
+    --run-dir result/cross_validation/explore_brats19 -- \
     --dataset_name brats19 --class_type all
 USAGE
 }
@@ -43,6 +45,8 @@ USAGE
 # cross_train.py, including the second `--` separator for train.py options.
 TRAIN_ARGS=()
 FORWARD_SEPARATOR_SEEN=0
+FOLD_INDEX_SEEN=0
+RUN_DIR_SEEN=0
 while [[ $# -gt 0 ]]; do
   if [[ "$FORWARD_SEPARATOR_SEEN" -eq 1 ]]; then
     TRAIN_ARGS+=("$1")
@@ -61,6 +65,18 @@ while [[ $# -gt 0 ]]; do
       GPU_DEVICE="$2"
       shift 2
       ;;
+    --fold-index)
+      [[ $# -ge 2 ]] || { echo "Error: --fold-index requires a value." >&2; usage >&2; exit 1; }
+      FOLD_INDEX_SEEN=1
+      TRAIN_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --run-dir)
+      [[ $# -ge 2 ]] || { echo "Error: --run-dir requires a value." >&2; usage >&2; exit 1; }
+      RUN_DIR_SEEN=1
+      TRAIN_ARGS+=("$1" "$2")
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -74,6 +90,12 @@ done
 
 if [[ -z "$GPU_DEVICE" ]]; then
   echo "Error: select one GPU or MIG device with --gpu-device or HFF_GPU_DEVICE." >&2
+  usage >&2
+  exit 1
+fi
+
+if [[ "$FOLD_INDEX_SEEN" -ne 1 || "$RUN_DIR_SEEN" -ne 1 ]]; then
+  echo "Error: each PBS training job must specify both --fold-index and --run-dir." >&2
   usage >&2
   exit 1
 fi
