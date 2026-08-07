@@ -98,7 +98,9 @@ class Brain(data.Dataset):
             volume_label = self.labels_transform(volume_label)
 
         # return volumes[0], volumes[1], volumes[2], volumes[3], \
-        return tuple(volumes) +(volume_label, pid, m_d, crop_size)
+        # Trailing metadata preserves all existing tuple indices while making
+        # it possible to identify the exact source record in failure logs.
+        return tuple(volumes) +(volume_label, pid, m_d, crop_size, image_path)
 
     def __len__(self):
         return len(self.dataset['data'])

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.distributions as td
 import torch.nn.functional as F
+import logging
 from einops import rearrange
 
 from utils.utils import get_device
@@ -11,6 +12,38 @@ BN_MOMENTUM = 0.1
 
 relu_inplace = True
 ActivationFunction = nn.ReLU
+
+logger = logging.getLogger(__name__)
+
+
+def _tensor_summary(name, tensor):
+    """Create compact diagnostics that are safe for non-finite tensors."""
+    value = tensor.detach()
+    finite = torch.isfinite(value)
+    finite_values = value[finite]
+    return {
+        'name': name,
+        'shape': tuple(value.shape),
+        'dtype': str(value.dtype),
+        'device': str(value.device),
+        'finite_values': int(finite.sum().item()),
+        'total_values': value.numel(),
+        'min_finite': float(finite_values.min().item()) if finite_values.numel() else None,
+        'max_finite': float(finite_values.max().item()) if finite_values.numel() else None,
+    }
+
+
+def _check_finite(stage, **tensors):
+    bad = {
+        name: tensor for name, tensor in tensors.items()
+        if not bool(torch.isfinite(tensor).all().item())
+    }
+    if not bad:
+        return
+    details = [_tensor_summary(name, tensor) for name, tensor in bad.items()]
+    message = f'Non-finite SliceAttention tensor at {stage}: {details}'
+    logger.error(message)
+    raise FloatingPointError(message)
 
 def conv1x1(in_chs, out_chs, stride=1):
     """1x1 convolution"""
@@ -196,6 +229,7 @@ class SliceAttentionModule(nn.Module):
             self.factor = nn.Linear(in_features=in_features, out_features=in_features * rank)
 
     def forward(self, x):
+        _check_finite('input', x=x)
         max_x = custom_max(x, dim=(1, 3, 4), keepdim=False).unsqueeze(0)  # Adjusted for 3D
         avg_x = torch.mean(x, dim=(1, 3, 4), keepdim=False)  # Adjusted for 3D
         max_x = self.linear(max_x)
@@ -205,11 +239,44 @@ class SliceAttentionModule(nn.Module):
             eps = 1.0
             temp = self.non_linear(att)
             mean = self.mean(temp)
-            diag = self.log_diag(temp).exp()
-            diag = F.softplus(diag) + eps
+            raw_diag = self.log_diag(temp)
             factor = self.factor(temp)
+            _check_finite(
+                'covariance_projection',
+                attention=att,
+                temp=temp,
+                mean=mean,
+                raw_diag=raw_diag,
+                factor=factor,
+            )
+
+            # Preserve the author's exp -> softplus -> +1.0 formulation while
+            # keeping exp() inside a representable float32 range.
+            if bool(((raw_diag < -20.0) | (raw_diag > 20.0)).any().item()):
+                logger.warning(
+                    'Clamping SliceAttention raw_diag before exp(); tensor=%s',
+                    _tensor_summary('raw_diag', raw_diag),
+                )
+            raw_diag = torch.clamp(raw_diag, min=-20.0, max=20.0)
+            diag = raw_diag.exp()
+            diag = F.softplus(diag) + eps
             factor = factor.view(1, -1, self.rank)
-            dist = td.LowRankMultivariateNormal(loc=mean, cov_factor=factor, cov_diag=diag)
+            _check_finite('covariance_construction', mean=mean, diag=diag, factor=factor)
+            try:
+                dist = td.LowRankMultivariateNormal(loc=mean, cov_factor=factor, cov_diag=diag)
+            except (RuntimeError, ValueError) as error:
+                details = [
+                    _tensor_summary('mean', mean),
+                    _tensor_summary('diag', diag),
+                    _tensor_summary('factor', factor),
+                ]
+                logger.exception(
+                    'LowRankMultivariateNormal construction failed; tensors=%s',
+                    details,
+                )
+                raise RuntimeError(
+                    f'LowRankMultivariateNormal construction failed; tensors={details}'
+                ) from error
             att = dist.sample()
         att = torch.sigmoid(att).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
         return x * att

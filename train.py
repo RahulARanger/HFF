@@ -97,6 +97,43 @@ def _gradient_norm(model):
     return float(squared_norm ** 0.5)
 
 
+def _failure_tensor_summary(tensor):
+    """Return JSON-safe statistics for diagnosing a failed batch."""
+    value = tensor.detach()
+    finite = torch.isfinite(value)
+    finite_values = value[finite]
+    return {
+        'shape': list(value.shape),
+        'dtype': str(value.dtype),
+        'finite_values': int(finite.sum().item()),
+        'total_values': value.numel(),
+        'min_finite': float(finite_values.min().item()) if finite_values.numel() else None,
+        'max_finite': float(finite_values.max().item()) if finite_values.numel() else None,
+    }
+
+
+def log_training_failure(path, *, epoch, batch, data, low_freq_inputs,
+                         high_freq_inputs, mask, learning_rate, error):
+    """Write failed-batch context both to the job output and a durable JSONL file."""
+    subjects = list(data[24]) if len(data) > 24 else [str(value) for value in data[21]]
+    record = {
+        'timestamp_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'epoch': epoch + 1,
+        'batch': batch + 1,
+        'subjects': subjects,
+        'learning_rate': float(learning_rate),
+        'error_type': type(error).__name__,
+        'error': str(error),
+        'low_frequency_inputs': _failure_tensor_summary(low_freq_inputs),
+        'high_frequency_inputs': _failure_tensor_summary(high_freq_inputs),
+        'mask': _failure_tensor_summary(mask),
+    }
+    serialized = json.dumps(record, allow_nan=False)
+    print('[TRAINING_FAILURE] ' + serialized, flush=True)
+    with open(path, 'a', encoding='utf-8') as failure_file:
+        failure_file.write(serialized + '\n')
+
+
 def save_training_metrics(path, args, history, best_result, best_metrics, best_epoch):
     """Persist the epoch history and best validation metrics for an experiment."""
     payload = {
@@ -206,10 +243,10 @@ if __name__ == '__main__':
         type=int,
         help='DataLoader worker processes for train and validation (default: 5).',
     )
-    parser.add_argument('-e', '--num_epochs', default=450, type=int)
+    parser.add_argument('-e', '--num_epochs', default=350, type=int)
     parser.add_argument('-s', '--step_size', default=50, type=int)
     parser.add_argument('-l', '--lr', default=0.3, type=float)
-    parser.add_argument('-g', '--gamma', default=0.55, type=float)
+    parser.add_argument('-g', '--gamma', default=0.53, type=float)
     parser.add_argument('-u', '--unsup_weight', default=15, type=float)
     parser.add_argument('--loss', default='dice', type=str)
     parser.add_argument('--loss2', default='ff', type=str)
@@ -269,6 +306,7 @@ if __name__ == '__main__':
         os.makedirs(path_trained_models)
 
     metrics_path = os.path.join(path_trained_models, 'training_metrics.json')
+    failure_log_path = os.path.join(path_trained_models, 'training_failures.jsonl')
 
 
     
@@ -392,7 +430,21 @@ if __name__ == '__main__':
             )
 
             optimizer.zero_grad()
-            outputs_train_1, outputs_train_2,side1,side2 = model(low_freq_inputs, high_freq_inputs)
+            try:
+                outputs_train_1, outputs_train_2,side1,side2 = model(low_freq_inputs, high_freq_inputs)
+            except Exception as error:
+                log_training_failure(
+                    failure_log_path,
+                    epoch=epoch,
+                    batch=i,
+                    data=data,
+                    low_freq_inputs=low_freq_inputs,
+                    high_freq_inputs=high_freq_inputs,
+                    mask=mask_train,
+                    learning_rate=optimizer.param_groups[0]['lr'],
+                    error=error,
+                )
+                raise
     
          
            
@@ -411,6 +463,28 @@ if __name__ == '__main__':
             loss_train = loss_train_sup1 + loss_train_sup2 + loss_train_unsup+loss_train_side1+loss_train_side2+reg_loss
             if not np.isfinite(loss_train.detach().item()):
                 non_finite_batches += 1
+                error = FloatingPointError(
+                    'Non-finite loss before backward: '
+                    f'total={loss_train.detach().item()}, '
+                    f'sup1={loss_train_sup1.detach().item()}, '
+                    f'sup2={loss_train_sup2.detach().item()}, '
+                    f'unsup={loss_train_unsup.detach().item()}, '
+                    f'side1={loss_train_side1.detach().item()}, '
+                    f'side2={loss_train_side2.detach().item()}, '
+                    f'regularization={reg_loss.detach().item()}'
+                )
+                log_training_failure(
+                    failure_log_path,
+                    epoch=epoch,
+                    batch=i,
+                    data=data,
+                    low_freq_inputs=low_freq_inputs,
+                    high_freq_inputs=high_freq_inputs,
+                    mask=mask_train,
+                    learning_rate=optimizer.param_groups[0]['lr'],
+                    error=error,
+                )
+                raise error
 
             loss_train.backward()
 
@@ -420,6 +494,29 @@ if __name__ == '__main__':
                     for name, param in model.named_parameters():
                         if name == "input_ed.conv.weight":
                             param.grad[important_weights] = 0
+
+            non_finite_gradients = [
+                name for name, parameter in model.named_parameters()
+                if parameter.grad is not None
+                and not bool(torch.isfinite(parameter.grad).all().item())
+            ]
+            if non_finite_gradients:
+                error = FloatingPointError(
+                    'Non-finite gradients before optimizer.step(): '
+                    + ', '.join(non_finite_gradients)
+                )
+                log_training_failure(
+                    failure_log_path,
+                    epoch=epoch,
+                    batch=i,
+                    data=data,
+                    low_freq_inputs=low_freq_inputs,
+                    high_freq_inputs=high_freq_inputs,
+                    mask=mask_train,
+                    learning_rate=optimizer.param_groups[0]['lr'],
+                    error=error,
+                )
+                raise error
 
 
             if i == num_batches['train_sup'] - 1:
