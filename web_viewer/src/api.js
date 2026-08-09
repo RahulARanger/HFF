@@ -1,12 +1,6 @@
 const apiPath = (path) => `/api${path}`;
 const REQUEST_TIMEOUT_MS = 30000;
 
-const subjectPath = (subjectId) =>
-  subjectId
-    .split("/")
-    .map((part) => encodeURIComponent(part))
-    .join("/");
-
 async function parseResponse(response) {
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
@@ -47,62 +41,10 @@ export async function fetchJson(path, options) {
   return response.json();
 }
 
-export async function fetchSubjects() {
-  return fetchJson("/subjects");
-}
-
-export async function fetchFolders(path = "") {
-  const query = path ? `?path=${encodeURIComponent(path)}` : "";
-  return fetchJson(`/folders${query}`);
-}
-
-export async function fetchMetadata(subjectId) {
-  return fetchJson(`/subjects/${subjectPath(subjectId)}/metadata`);
-}
-
-export async function fetchCheckpoints() {
-  return fetchJson("/checkpoints");
-}
-
 export async function fetchMonitorRuns() {
   return fetchJson("/monitor/runs");
 }
 
 export async function fetchMonitorRun(runId, limit = 240) {
   return fetchJson(`/monitor/runs/${runId.split("/").map(encodeURIComponent).join("/")}?limit=${limit}`);
-}
-
-export async function generateOutput(subjectId, checkpointId) {
-  return fetchJson(`/subjects/${subjectPath(subjectId)}/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ checkpoint_id: checkpointId }),
-  });
-}
-
-export function resourceSource(subjectId, resource, revision = 0) {
-  const subject = subjectPath(subjectId);
-  let endpoint;
-  let name;
-
-  if (resource.kind === "volume") {
-    endpoint = `/subjects/${subject}/volumes/${encodeURIComponent(resource.modality)}/nifti`;
-    name = `${resource.modality.toLowerCase()}.nii.gz`;
-  } else if (resource.kind === "frequency") {
-    endpoint = `/subjects/${subject}/frequency/${encodeURIComponent(resource.modality)}/${encodeURIComponent(resource.band)}/nifti`;
-    name = `${resource.modality.toLowerCase()}_${resource.band.toLowerCase()}.nii.gz`;
-  } else if (resource.kind === "mask") {
-    endpoint = `/subjects/${subject}/masks/${encodeURIComponent(resource.maskKind)}/nifti`;
-    name = `${resource.maskKind}.nii.gz`;
-  } else {
-    throw new Error(`Unsupported viewer resource: ${resource.kind}`);
-  }
-
-  const query = new URLSearchParams();
-  if (resource.maskKind === "output" && resource.checkpointId) {
-    query.set("checkpoint_id", resource.checkpointId);
-  }
-  if (resource.maskKind === "output" && revision) query.set("revision", String(revision));
-  const suffix = query.toString() ? `?${query.toString()}` : "";
-  return { url: apiPath(`${endpoint}${suffix}`), name };
 }

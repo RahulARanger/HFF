@@ -1,66 +1,28 @@
-"""FastAPI backend for the HFF-Net NiiVue viewer.
-
-The API keeps the existing typed-buffer endpoints for compatibility and also
-serves NIfTI responses for NiiVue. This lets the browser load scans directly
-without rebuilding every volume into a VTK.js image object.
-"""
+"""FastAPI backend for the HFF-Net training monitor."""
 
 from __future__ import annotations
 
 import argparse
 from collections import deque
 from datetime import datetime, timezone
-from functools import lru_cache
-import gzip
 import json
 from pathlib import Path
 import re
-from typing import Literal
 
-import nibabel as nib
-import numpy as np
 import psutil
-import SimpleITK as sitk
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel
-
-from viewer_core import (
-    BRATS_SEGMENTATION_COLORS,
-    DISPLAY_MODALITIES,
-    SEGMENTATION_LABELS,
-    canonical_segmentation_labels,
-    checkpoint_output_path,
-    contrast_limits,
-    discover_checkpoints,
-    discover_subject_ids,
-    find_frequency_file,
-    find_scan_path,
-    load_frequency_volume,
-    load_volume,
-    restrict_mask_to_scan_foreground,
-    resolve_subject,
-    subject_files,
-    generate_output_segmentation,
-)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_DATA_ROOT = PROJECT_ROOT / "dataset"
 DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "result"
 MONITOR_LOG_SUFFIX = "_resource_usage.jsonl"
 MONITOR_SUMMARY_SUFFIX = "_resource_summary.json"
 FOLD_PATTERN = re.compile(r"^fold_(\d+)$")
 
 
-class GenerateRequest(BaseModel):
-    checkpoint_id: str
-
-
 class ViewerServer:
-    def __init__(self, dataset_root: Path, results_root: Path) -> None:
-        self.dataset_root = self._resolve_project_path(dataset_root)
+    def __init__(self, results_root: Path) -> None:
         self.results_root = self._resolve_project_path(results_root)
 
     @staticmethod
@@ -68,113 +30,6 @@ class ViewerServer:
         """Resolve relative CLI paths from the repository, not the shell cwd."""
         expanded = path.expanduser()
         return (PROJECT_ROOT / expanded if not expanded.is_absolute() else expanded).resolve()
-
-    def subject(self, subject_id: str) -> Path:
-        try:
-            return resolve_subject(self.dataset_root, subject_id)
-        except (FileNotFoundError, ValueError) as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    def checkpoint(self, checkpoint_id: str) -> Path:
-        """Resolve a checkpoint from the server-owned results directory."""
-        candidate = (self.results_root / checkpoint_id).resolve()
-        if self.results_root not in candidate.parents or candidate.suffix != ".pth":
-            raise HTTPException(status_code=404, detail="Unknown checkpoint.")
-        if not candidate.is_file():
-            raise HTTPException(status_code=404, detail="Unknown checkpoint.")
-        return candidate
-
-    def subject_ids(self) -> tuple[str, ...]:
-        if not self.dataset_root.exists():
-            return ()
-        return discover_subject_ids(str(self.dataset_root))
-
-
-def binary_volume_response(
-    volume: np.ndarray,
-    *,
-    dtype: Literal["float32", "uint8"],
-    spacing: tuple[float, float, float] = (1.0, 1.0, 1.0),
-    intensity_range: tuple[float, float] | None = None,
-) -> Response:
-    if dtype == "float32":
-        encoded = np.ascontiguousarray(volume, dtype=np.float32)
-    else:
-        encoded = np.ascontiguousarray(volume, dtype=np.uint8)
-
-    headers = {
-        "X-Shape": ",".join(str(axis) for axis in encoded.shape),
-        "X-Dtype": dtype,
-        # NumPy volumes are ordered z, y, x; SimpleITK spacing is x, y, z.
-        "X-Spacing": ",".join(str(value) for value in reversed(spacing)),
-        "Cache-Control": "no-store",
-    }
-    if intensity_range is not None:
-        headers["X-Intensity-Range"] = ",".join(str(value) for value in intensity_range)
-    return Response(
-        content=encoded.tobytes(order="C"),
-        media_type="application/octet-stream",
-        headers=headers,
-    )
-
-
-def nifti_volume_response(
-    volume: np.ndarray,
-    *,
-    reference_path: Path,
-    dtype: Literal["float32", "uint8"],
-    filename: str,
-) -> Response:
-    """Encode a z-y-x NumPy volume as a cached, compressed NIfTI response."""
-    source = nib.load(str(reference_path))
-    data = np.asarray(volume, dtype=np.float32 if dtype == "float32" else np.uint8)
-    image = nib.Nifti1Image(data.transpose(2, 1, 0), source.affine, header=source.header.copy())
-    image.set_data_dtype(np.float32 if dtype == "float32" else np.uint8)
-    image.set_qform(source.affine, code=int(source.header["qform_code"]) or 1)
-    image.set_sform(source.affine, code=int(source.header["sform_code"]) or 1)
-    image.header["scl_slope"] = 1.0
-    image.header["scl_inter"] = 0.0
-    payload = gzip.compress(image.to_bytes(), compresslevel=6, mtime=0)
-    return Response(
-        content=payload,
-        media_type="application/gzip",
-        headers={
-            "Content-Disposition": f'inline; filename="{filename}"',
-            "Cache-Control": "public, max-age=3600",
-        },
-    )
-
-
-def nifti_file_response(path: Path) -> Response:
-    """Serve the original compressed NIfTI without loading it into Python."""
-    if path.name.endswith(".nii.gz"):
-        return FileResponse(
-            path,
-            media_type="application/gzip",
-            filename=path.name,
-            headers={"Cache-Control": "public, max-age=3600"},
-        )
-    return nifti_volume_response(
-        load_volume(path),
-        reference_path=path,
-        dtype="float32",
-        filename=f"{path.stem}.nii.gz",
-    )
-
-
-@lru_cache(maxsize=64)
-def reference_spacing(path: Path) -> tuple[float, float, float]:
-    """Cache image-header reads shared by metadata and volume responses."""
-    return tuple(float(value) for value in sitk.ReadImage(str(path)).GetSpacing())
-
-
-def image_header(path: Path) -> sitk.ImageFileReader:
-    """Read only NIfTI header information for fast folder selection."""
-    reader = sitk.ImageFileReader()
-    reader.SetFileName(str(path))
-    reader.ReadImageInformation()
-    return reader
-
 
 def read_jsonl_tail(path: Path, limit: int) -> list[dict[str, object]]:
     """Read only the newest monitor samples so polling stays cheap for long runs."""
@@ -370,9 +225,9 @@ def monitor_record(
     }
 
 
-def create_app(dataset_root: Path = DEFAULT_DATA_ROOT, results_root: Path = DEFAULT_RESULTS_ROOT) -> FastAPI:
-    state = ViewerServer(dataset_root, results_root)
-    app = FastAPI(title="HFF-Net BraTS viewer API", version="1.0.0")
+def create_app(results_root: Path = DEFAULT_RESULTS_ROOT) -> FastAPI:
+    state = ViewerServer(results_root)
+    app = FastAPI(title="HFF-Net training monitor API", version="1.0.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -384,76 +239,6 @@ def create_app(dataset_root: Path = DEFAULT_DATA_ROOT, results_root: Path = DEFA
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
-
-    @app.get("/api/subjects")
-    def subjects() -> dict[str, object]:
-        records = []
-        for subject_id in state.subject_ids():
-            subject_dir = state.subject(subject_id)
-            scans, segmentation = subject_files(subject_dir)
-            modalities = [
-                path.name.rsplit("_", 1)[-1].split(".", 1)[0].upper()
-                for path in scans
-            ]
-            records.append(
-                {
-                    "id": subject_id,
-                    "label": subject_dir.name,
-                    "path": subject_id,
-                    "modalities": modalities,
-                    "has_segmentation": segmentation is not None,
-                }
-            )
-        return {"subjects": records}
-
-    @app.get("/api/folders")
-    def folders(path: str = "") -> dict[str, object]:
-        """List directories lazily without inspecting their files."""
-        root = state.dataset_root.resolve()
-        if not root.is_dir():
-            raise HTTPException(
-                status_code=503,
-                detail=f"Configured dataset root does not exist: {root}",
-            )
-        candidate = (root / path).resolve()
-        if candidate != root and root not in candidate.parents:
-            raise HTTPException(status_code=400, detail="Folder path is outside the dataset root.")
-        if not candidate.is_dir():
-            raise HTTPException(status_code=404, detail="Folder does not exist.")
-        relative_path = candidate.relative_to(root).as_posix()
-        child_folders = [
-            child
-            for child in candidate.iterdir()
-            if child.is_dir() and not child.name.startswith(".")
-        ]
-        child_folders.sort(key=lambda child: child.name.lower())
-        return {
-            "root": root.name,
-            "path": relative_path,
-            "selectable": bool(subject_files(candidate)[0]),
-            "folders": [
-                {
-                    "id": child.relative_to(root).as_posix(),
-                    "label": child.name,
-                    "path": child.relative_to(root).as_posix(),
-                    "selectable": bool(subject_files(child)[0]),
-                }
-                for child in child_folders
-            ],
-        }
-
-    @app.get("/api/checkpoints")
-    def checkpoints() -> dict[str, object]:
-        return {
-            "checkpoints": [
-                {
-                    "id": checkpoint.relative_to(state.results_root).as_posix(),
-                    "label": checkpoint.relative_to(state.results_root).as_posix(),
-                    "modified": checkpoint.stat().st_mtime,
-                }
-                for checkpoint in discover_checkpoints(state.results_root)
-            ]
-        }
 
     @app.get("/api/monitor/runs")
     def monitor_runs() -> dict[str, object]:
@@ -485,198 +270,11 @@ def create_app(dataset_root: Path = DEFAULT_DATA_ROOT, results_root: Path = DEFA
         record["samples"] = read_jsonl_tail(candidate, limit)
         return record
 
-    @app.get("/api/subjects/{subject_id:path}/metadata")
-    def metadata(subject_id: str) -> dict[str, object]:
-        subject_dir = state.subject(subject_id)
-        scans, segmentation = subject_files(subject_dir)
-        scan_metadata: dict[str, object] = {}
-        for path in scans:
-            modality = path.name.rsplit("_", 1)[-1].split(".", 1)[0].upper()
-            # Metadata must stay header-only. Loading full 3D arrays here made
-            # folder selection block before the viewer could show any state.
-            image = image_header(path)
-            available_bands = {
-                band: find_frequency_file(path, band) is not None
-                for band in ("L", "H1", "H2", "H3", "H4")
-            }
-            scan_metadata[modality] = {
-                "shape": list(reversed(image.GetSize())),
-                "spacing": list(reversed(image.GetSpacing())),
-                "frequency": available_bands,
-            }
-
-        mask_shape = None
-        if segmentation is not None:
-            mask_shape = list(reversed(image_header(segmentation).GetSize()))
-        return {
-            "id": subject_id,
-            "label": subject_dir.name,
-            "modalities": [modality for modality in DISPLAY_MODALITIES if modality in scan_metadata],
-            "scans": scan_metadata,
-            "segmentation": {"available": segmentation is not None, "shape": mask_shape},
-        }
-
-    @app.get("/api/subjects/{subject_id:path}/volumes/{modality}")
-    def volume(subject_id: str, modality: str) -> Response:
-        subject_dir = state.subject(subject_id)
-        modality = modality.upper()
-        if modality not in DISPLAY_MODALITIES:
-            raise HTTPException(status_code=400, detail=f"Unsupported modality: {modality}")
-        scan_path = find_scan_path(subject_dir, modality)
-        actual = load_volume(scan_path)
-        return binary_volume_response(
-            actual,
-            dtype="float32",
-            spacing=reference_spacing(scan_path),
-            intensity_range=contrast_limits(actual),
-        )
-
-    @app.get("/api/subjects/{subject_id:path}/volumes/{modality}/nifti")
-    def nifti_volume(subject_id: str, modality: str) -> Response:
-        """Serve the source scan in the NIfTI form expected by NiiVue."""
-        subject_dir = state.subject(subject_id)
-        modality = modality.upper()
-        if modality not in DISPLAY_MODALITIES:
-            raise HTTPException(status_code=400, detail=f"Unsupported modality: {modality}")
-        scan_path = find_scan_path(subject_dir, modality)
-        return nifti_file_response(scan_path)
-
-    @app.get("/api/subjects/{subject_id:path}/frequency/{modality}/{band}")
-    def frequency(subject_id: str, modality: str, band: str) -> Response:
-        subject_dir = state.subject(subject_id)
-        modality = modality.upper()
-        band = band.upper()
-        if modality not in DISPLAY_MODALITIES or band not in {"L", "H1", "H2", "H3", "H4"}:
-            raise HTTPException(status_code=400, detail="Unsupported frequency request.")
-        scan_path = find_scan_path(subject_dir, modality)
-        actual = load_volume(scan_path)
-        loaded, available = load_frequency_volume(scan_path, band, actual)
-        if not available:
-            raise HTTPException(status_code=404, detail=f"Frequency volume {band} is not available.")
-        loaded = loaded.astype(np.float32, copy=False)
-        return binary_volume_response(
-            loaded,
-            dtype="float32",
-            spacing=reference_spacing(scan_path),
-            intensity_range=contrast_limits(loaded),
-        )
-
-    @app.get("/api/subjects/{subject_id:path}/frequency/{modality}/{band}/nifti")
-    def nifti_frequency(subject_id: str, modality: str, band: str) -> Response:
-        """Encode a derived frequency volume while preserving scan geometry."""
-        subject_dir = state.subject(subject_id)
-        modality = modality.upper()
-        band = band.upper()
-        if modality not in DISPLAY_MODALITIES or band not in {"L", "H1", "H2", "H3", "H4"}:
-            raise HTTPException(status_code=400, detail="Unsupported frequency request.")
-        scan_path = find_scan_path(subject_dir, modality)
-        actual = load_volume(scan_path)
-        loaded, available = load_frequency_volume(scan_path, band, actual)
-        if not available:
-            raise HTTPException(status_code=404, detail=f"Frequency volume {band} is not available.")
-        return nifti_volume_response(
-            loaded,
-            reference_path=scan_path,
-            dtype="float32",
-            filename=f"{modality.lower()}_{band.lower()}.nii.gz",
-        )
-
-    @app.get("/api/subjects/{subject_id:path}/masks/{mask_kind}")
-    def mask(
-        subject_id: str,
-        mask_kind: Literal["expected", "output"],
-        checkpoint_id: str | None = None,
-    ) -> Response:
-        subject_dir = state.subject(subject_id)
-        flair_path = find_scan_path(subject_dir, "FLAIR")
-        flair = load_volume(flair_path)
-
-        if mask_kind == "expected":
-            segmentation = subject_files(subject_dir)[1]
-            if segmentation is None:
-                raise HTTPException(status_code=404, detail="Expected segmentation is not available.")
-            labels = canonical_segmentation_labels(load_volume(segmentation), flair.shape)
-        else:
-            if checkpoint_id is None:
-                raise HTTPException(status_code=400, detail="checkpoint_id is required for output masks.")
-            checkpoint = state.checkpoint(checkpoint_id)
-            output_path = checkpoint_output_path(state.results_root, checkpoint, subject_dir)
-            if not output_path.is_file():
-                raise HTTPException(status_code=404, detail="Generated output is not available.")
-            labels = load_volume(output_path).astype(np.uint8)
-            labels = canonical_segmentation_labels(labels, flair.shape)
-            labels = np.where(restrict_mask_to_scan_foreground(labels, flair) > 0, labels, 0).astype(np.uint8)
-
-        return binary_volume_response(labels, dtype="uint8", spacing=reference_spacing(flair_path))
-
-    @app.get("/api/subjects/{subject_id:path}/masks/{mask_kind}/nifti")
-    def nifti_mask(
-        subject_id: str,
-        mask_kind: Literal["expected", "output"],
-        checkpoint_id: str | None = None,
-        revision: int = 0,
-    ) -> Response:
-        """Serve a segmentation as a label-aware NIfTI overlay."""
-        del revision  # The client uses this only to invalidate a prior 404/cache entry.
-        subject_dir = state.subject(subject_id)
-        flair_path = find_scan_path(subject_dir, "FLAIR")
-        flair = load_volume(flair_path)
-
-        if mask_kind == "expected":
-            segmentation = subject_files(subject_dir)[1]
-            if segmentation is None:
-                raise HTTPException(status_code=404, detail="Expected segmentation is not available.")
-            labels = canonical_segmentation_labels(load_volume(segmentation), flair.shape)
-        else:
-            if checkpoint_id is None:
-                raise HTTPException(status_code=400, detail="checkpoint_id is required for output masks.")
-            checkpoint = state.checkpoint(checkpoint_id)
-            output_path = checkpoint_output_path(state.results_root, checkpoint, subject_dir)
-            if not output_path.is_file():
-                raise HTTPException(status_code=404, detail="Generated output is not available.")
-            labels = load_volume(output_path).astype(np.uint8)
-            labels = canonical_segmentation_labels(labels, flair.shape)
-            labels = np.where(restrict_mask_to_scan_foreground(labels, flair) > 0, labels, 0).astype(np.uint8)
-
-        return nifti_volume_response(
-            labels,
-            reference_path=flair_path,
-            dtype="uint8",
-            filename=f"{mask_kind}.nii.gz",
-        )
-
-    @app.post("/api/subjects/{subject_id:path}/generate")
-    def generate(subject_id: str, request: GenerateRequest) -> dict[str, str]:
-        subject_dir = state.subject(subject_id)
-        checkpoint = state.checkpoint(request.checkpoint_id)
-        try:
-            output_path = generate_output_segmentation(checkpoint, subject_dir, state.results_root)
-        except (FileNotFoundError, ValueError, RuntimeError) as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        return {
-            "output_id": output_path.relative_to(state.results_root).as_posix(),
-            "message": "Output segmentation generated.",
-        }
-
-    @app.get("/api/labels")
-    def labels() -> dict[str, object]:
-        return {
-            "labels": [
-                {
-                    "value": value,
-                    "name": name,
-                    "color": list(BRATS_SEGMENTATION_COLORS.get(value, (0.0, 0.0, 0.0, 0.0))),
-                }
-                for value, name in SEGMENTATION_LABELS.items()
-            ]
-        }
-
     return app
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--results-root", type=Path, default=DEFAULT_RESULTS_ROOT)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8010)
@@ -687,7 +285,7 @@ def main() -> None:
     import uvicorn
 
     args = parse_args()
-    uvicorn.run(create_app(args.dataset_root, args.results_root), host=args.host, port=args.port)
+    uvicorn.run(create_app(args.results_root), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
