@@ -254,7 +254,8 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .monitor-run-group-folds { border-top: 1px solid var(--line-soft); }
 .monitor-run-card-shell { position: relative; border-bottom: 1px solid #1d2b37; }
 .monitor-run-card-shell.selected { box-shadow: inset 3px 0 var(--blue); background: linear-gradient(90deg, rgba(0, 112, 243, 0.22), rgba(0, 112, 243, 0.04)); }
-.monitor-run-card { display: block; width: 100%; padding: 12px 72px 11px 18px; border: 0; color: inherit; background: transparent; text-align: left; }
+.monitor-run-card { display: block; width: 100%; padding: 12px 18px 11px; border: 0; color: inherit; background: transparent; text-align: left; }
+.monitor-run-card-shell .monitor-run-card { padding-right: 72px; }
 .monitor-run-card:hover { background: #0b1822; }
 .monitor-run-card-shell.selected .monitor-run-card { background: transparent; }
 .monitor-run-delete-button { position: absolute; top: 12px; right: 14px; min-height: 25px; padding: 0 7px; border: 1px solid #55343b; border-radius: 4px; color: #d99098; background: rgba(71, 29, 35, 0.35); font-size: 9px; }
