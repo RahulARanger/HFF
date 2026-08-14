@@ -6,11 +6,14 @@ import argparse
 from collections import deque
 from datetime import datetime, timezone
 import json
+import logging
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import threading
+import traceback
 import uuid
 from typing import Literal
 
@@ -24,6 +27,7 @@ from utils.utils import get_device
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+LOGGER = logging.getLogger("hff.viewer")
 DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "result"
 MONITOR_LOG_SUFFIX = "_resource_usage.jsonl"
 MONITOR_SUMMARY_SUFFIX = "_resource_summary.json"
@@ -201,6 +205,34 @@ class ViewerServer:
         except OSError:
             return ""
 
+    @staticmethod
+    def _write_eval_log_header(
+        log_path: Path,
+        job_id: str,
+        command: list[str],
+        request: EvaluationRequest,
+    ) -> None:
+        """Start a self-contained evaluation log that is useful when sharing failures."""
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("w", encoding="utf-8") as log_file:
+            log_file.write("HFF-Net evaluation backend log\n")
+            log_file.write(f"job_id: {job_id}\n")
+            log_file.write(f"created_at: {datetime.now(timezone.utc).isoformat()}\n")
+            log_file.write(f"command: {shlex.join(command)}\n")
+            log_file.write("request:\n")
+            log_file.write(json.dumps(request.model_dump(), indent=2, default=str))
+            log_file.write("\n\n--- cross_eval.py output ---\n")
+
+    @staticmethod
+    def _append_eval_log(log_path: Path, message: str) -> None:
+        """Append backend diagnostics without replacing the child-process output."""
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(f"\n{message.rstrip()}\n")
+        except OSError:
+            LOGGER.exception("Could not append evaluation diagnostics to %s", log_path)
+
     def _write_eval_manifest(self, manifest_path: Path, job_id: str) -> None:
         """Persist enough metadata to rediscover validation telemetry after restart."""
         with self.eval_lock:
@@ -257,7 +289,15 @@ class ViewerServer:
                 "--num_workers", str(request.num_workers),
                 "--output_dir", str(output_dir),
             ]
+            self._write_eval_log_header(log_path, job_id, command, request)
         except OSError as exc:
+            self._append_eval_log(
+                log_path,
+                "--- backend startup failure ---\n"
+                f"exception: {type(exc).__name__}: {exc}\n"
+                f"traceback:\n{traceback.format_exc()}",
+            )
+            LOGGER.exception("Evaluation %s could not be prepared; log=%s", job_id, log_path)
             with self.eval_lock:
                 self.eval_jobs[job_id].update({
                     "status": "failed",
@@ -286,6 +326,7 @@ class ViewerServer:
                 "resource_monitor_interval": request.resource_monitor_interval,
             })
         self._write_eval_manifest(manifest_path, job_id)
+        LOGGER.info("Evaluation %s started; log=%s", job_id, log_path)
 
         return_code = -1
         resource_monitor: ResourceMonitor | None = None
@@ -324,9 +365,23 @@ class ViewerServer:
                 return_code = process.wait()
             status = "completed" if return_code == 0 else "failed"
             error = None if return_code == 0 else f"cross_eval.py exited with code {return_code}."
+            if return_code != 0:
+                self._append_eval_log(
+                    log_path,
+                    "--- evaluation failure ---\n"
+                    f"return_code: {return_code}\n"
+                    f"message: {error}",
+                )
         except OSError as exc:
             status = "failed"
             error = str(exc)
+            self._append_eval_log(
+                log_path,
+                "--- backend process failure ---\n"
+                f"exception: {type(exc).__name__}: {exc}\n"
+                f"traceback:\n{traceback.format_exc()}",
+            )
+            LOGGER.exception("Evaluation %s failed before completion; log=%s", job_id, log_path)
         finally:
             if resource_monitor is not None:
                 try:
@@ -353,6 +408,15 @@ class ViewerServer:
             if self.active_eval_job == job_id:
                 self.active_eval_job = None
         self._write_eval_manifest(manifest_path, job_id)
+        if status == "failed":
+            LOGGER.error(
+                "Evaluation %s failed (return_code=%s); log=%s",
+                job_id,
+                return_code,
+                log_path,
+            )
+        else:
+            LOGGER.info("Evaluation %s completed; log=%s", job_id, log_path)
 
     def _validation_record(
         self,
@@ -952,6 +1016,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     import uvicorn
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     args = parse_args()
     uvicorn.run(create_app(args.results_root), host=args.host, port=args.port)
 

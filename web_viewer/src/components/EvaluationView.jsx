@@ -121,6 +121,7 @@ function JobCard({ job, onRenamed }) {
         {job.error && <div className="app-alert evaluation-alert">{job.error}</div>}
         {job.status === "completed" && <EvaluationResultTabs summary={summary} />}
         {job.status !== "completed" && job.log_tail && <pre className="evaluation-log">{job.log_tail}</pre>}
+        {job.log_file && <div className="evaluation-job-files"><span>Backend log</span><code title={job.log_file}>{shortPath(job.log_file)}</code></div>}
         {job.status === "completed" && <div className="evaluation-job-files"><span>Summary</span><code title={job.summary_file}>{shortPath(job.summary_file)}</code></div>}
       </CardContent>
     </Card>
