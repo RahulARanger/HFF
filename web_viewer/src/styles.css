@@ -124,14 +124,29 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .evaluation-field input, .evaluation-field select { width: 100%; min-height: 37px; padding: 0 10px; border: 1px solid #2b4253; border-radius: 6px; outline: none; color: #dfeaf0; background: #080f16; font-size: 11px; }
 .evaluation-field input:focus, .evaluation-field select:focus { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(0, 112, 243, 0.15); }
 .evaluation-field small { color: #7e919e; font-size: 9px; }
+.evaluation-checkpoint-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #7e919e; font-size: 9px; }
+.evaluation-switch { display: inline-flex !important; align-items: center; justify-content: flex-start !important; gap: 7px !important; color: #b4c5ce !important; cursor: pointer; white-space: nowrap; }
+.evaluation-switch input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
+.evaluation-switch-track { position: relative; display: inline-block; width: 28px; height: 16px; flex: 0 0 28px; border: 1px solid #3b5668; border-radius: 999px; background: #111d26; transition: background 120ms ease, border-color 120ms ease; }
+.evaluation-switch-track::after { position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: #8295a1; content: ""; transition: transform 120ms ease, background 120ms ease; }
+.evaluation-switch input:checked + .evaluation-switch-track { border-color: var(--teal); background: rgba(80, 227, 194, 0.2); }
+.evaluation-switch input:checked + .evaluation-switch-track::after { background: var(--teal); transform: translateX(12px); }
+.evaluation-switch input:focus-visible + .evaluation-switch-track { box-shadow: 0 0 0 2px rgba(0, 112, 243, 0.3); }
 .evaluation-checkpoint-list { display: grid; max-height: 270px; overflow: auto; border: 1px solid #223747; border-radius: 6px; background: #080f16; }
 .evaluation-checkpoint { display: flex; align-items: flex-start; gap: 10px; padding: 10px; border-bottom: 1px solid #1d2b37; color: #a9bac4; cursor: pointer; }
 .evaluation-checkpoint:last-child { border-bottom: 0; }
 .evaluation-checkpoint:hover, .evaluation-checkpoint.selected { background: rgba(0, 112, 243, 0.11); }
 .evaluation-checkpoint input { width: 14px; height: 14px; margin-top: 1px; accent-color: var(--blue); }
-.evaluation-checkpoint > span { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.evaluation-checkpoint strong { overflow: hidden; color: #e5edf1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.evaluation-checkpoint small { overflow: hidden; color: #778e9e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.evaluation-checkpoint-content { display: flex; flex: 1; flex-direction: column; gap: 8px; min-width: 0; }
+.evaluation-checkpoint-heading { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.evaluation-checkpoint-heading strong { overflow: hidden; color: #e5edf1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.evaluation-checkpoint-heading em { padding: 2px 5px; border: 1px solid rgba(245, 194, 66, 0.42); border-radius: 999px; color: var(--amber); font-size: 8px; font-style: normal; white-space: nowrap; }
+.evaluation-checkpoint-heading small { margin-left: auto; color: #778e9e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; white-space: nowrap; }
+.evaluation-checkpoint-scores { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
+.evaluation-checkpoint-scores > span { display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 6px 7px; border: 1px solid #233b4b; border-radius: 4px; background: #050a0e; }
+.evaluation-checkpoint-scores small { color: #718896; font-size: 8px; font-weight: 700; }
+.evaluation-checkpoint-scores strong { color: #d9edf2; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; font-variant-numeric: tabular-nums; }
+.evaluation-last-save-note { color: #9a8a62; font-size: 8px; }
 .evaluation-submit { width: 100%; min-height: 41px; margin-top: 20px; border-color: transparent; font-size: 12px; }
 .evaluation-running-note { display: flex; align-items: center; gap: 7px; margin-top: 12px; color: #8ca1ae; font-size: 10px; line-height: 1.4; }
 .evaluation-running-note code, .evaluation-job-card code { color: #a9c7da; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -144,6 +159,17 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .evaluation-job-card .wm-card-header { padding-bottom: 0; }
 .evaluation-job-card .wm-card-title { font-size: 12px; }
 .evaluation-job-card .wm-card-content { padding-top: 12px; }
+.evaluation-job-actions { display: flex; align-items: center; gap: 8px; }
+.evaluation-rename-button { min-height: 27px; padding: 0 8px; border-color: #2a4659; color: #8db9d7; background: transparent; font-size: 9px; }
+.evaluation-rename-button:hover:not(:disabled) { border-color: var(--blue); color: #ffffff; }
+.evaluation-name-editor { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; padding: 10px; border: 1px solid #233444; background: #080f16; }
+.evaluation-name-editor label { color: #dbe6eb; font-size: 10px; font-weight: 700; }
+.evaluation-name-editor > div { display: flex; gap: 6px; }
+.evaluation-name-editor input { min-width: 0; flex: 1; min-height: 31px; padding: 0 8px; border: 1px solid #2b4253; border-radius: 5px; outline: none; color: #dfeaf0; background: #050a0e; font-size: 10px; }
+.evaluation-name-editor input:focus { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(0, 112, 243, 0.15); }
+.evaluation-name-editor small { color: #7e919e; font-size: 9px; }
+.evaluation-name-save, .evaluation-name-cancel { min-height: 31px; padding: 0 9px; font-size: 9px; }
+.evaluation-name-cancel { border-color: #2a4659; color: #8da4b3; background: transparent; }
 .evaluation-job-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .evaluation-job-meta span, .evaluation-average-grid > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; padding: 9px; border: 1px solid #233444; background: #080f16; }
 .evaluation-job-meta label, .evaluation-average-grid span { color: #7f919d; font-size: 9px; }

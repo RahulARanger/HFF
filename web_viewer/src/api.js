@@ -69,6 +69,14 @@ export async function startEvaluation(request) {
   });
 }
 
+export async function renameEvaluation(jobId, name) {
+  return fetchJson(`/eval/jobs/${encodeURIComponent(jobId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
 export async function fetchValidationRuns() {
   return fetchJson("/validation/runs");
 }

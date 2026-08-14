@@ -29,11 +29,21 @@ MONITOR_LOG_SUFFIX = "_resource_usage.jsonl"
 MONITOR_SUMMARY_SUFFIX = "_resource_summary.json"
 FOLD_PATTERN = re.compile(r"^fold_(\d+)$")
 EVAL_JOB_LOG_SUFFIX = ".log"
+CHECKPOINT_SCORE_PATTERN = re.compile(
+    r"^best_(?P<result>Result[12])_et_(?P<et>\d+(?:\.\d+)?)"
+    r"_tc_(?P<tc>\d+(?:\.\d+)?)_wt_(?P<wt>\d+(?:\.\d+)?)\.pth$",
+    re.IGNORECASE,
+)
+CHECKPOINT_LAST_SAVE_PATTERN = re.compile(
+    r"^best_Jc_(?P<jc>\d+(?:\.\d+)?)\.pth$",
+    re.IGNORECASE,
+)
 
 
 class EvaluationRequest(BaseModel):
     """Validated inputs accepted by the web evaluation form."""
 
+    name: str | None = Field(default=None, max_length=120)
     checkpoints: list[str] = Field(min_length=1)
     output_dir: str = Field(min_length=1)
     test_list: str = Field(min_length=1)
@@ -42,6 +52,18 @@ class EvaluationRequest(BaseModel):
     batch_size: int = Field(default=1, ge=1, le=32)
     num_workers: int = Field(default=3, ge=0, le=64)
     resource_monitor_interval: float = Field(default=5.0, gt=0.0, le=300.0)
+
+
+class EvaluationRenameRequest(BaseModel):
+    """Optional human-readable label for an existing evaluation job."""
+
+    name: str | None = Field(default=None, max_length=120)
+
+
+def normalize_evaluation_name(name: str | None) -> str | None:
+    """Treat blank labels as unset while keeping the generated job ID intact."""
+    normalized = name.strip() if isinstance(name, str) else ""
+    return normalized or None
 
 
 class ViewerServer:
@@ -59,11 +81,46 @@ class ViewerServer:
 
     def evaluation_options(self) -> dict[str, object]:
         """Return discoverable checkpoints and test manifests for the web form."""
-        checkpoints = sorted(
-            (path for path in self.results_root.rglob("*.pth") if path.is_file()),
-            key=lambda path: path.stat().st_mtime,
+        checkpoints = []
+        checkpoint_groups: dict[str, dict[str, object]] = {}
+        cross_validation_root = self.results_root / "cross_validation"
+        if cross_validation_root.exists():
+            for path in cross_validation_root.rglob("*.pth"):
+                if not path.is_file():
+                    continue
+                relative_path = path.relative_to(cross_validation_root)
+                if len(relative_path.parts) < 2:
+                    continue
+                run_name = relative_path.parts[0]
+                checkpoint = self._checkpoint_option(path, run_name, relative_path)
+                checkpoints.append(checkpoint)
+                group = checkpoint_groups.setdefault(
+                    run_name,
+                    {
+                        "name": run_name,
+                        "label": run_name,
+                        "checkpoints": [],
+                        "latest_modified_at": 0.0,
+                    },
+                )
+                group["checkpoints"].append(checkpoint)
+                group["latest_modified_at"] = max(
+                    float(group["latest_modified_at"]),
+                    float(checkpoint["modified_at"]),
+                )
+
+        checkpoints.sort(key=lambda item: (item["modified_at"], item["path"]), reverse=True)
+        groups = sorted(
+            checkpoint_groups.values(),
+            key=lambda group: (group["latest_modified_at"], group["name"]),
             reverse=True,
-        ) if self.results_root.exists() else []
+        )
+        for group in groups:
+            group["checkpoints"].sort(
+                key=lambda item: (item["modified_at"], item["path"]),
+                reverse=True,
+            )
+
         dataset_root = PROJECT_ROOT / "dataset"
         test_lists = sorted(
             (path for path in dataset_root.rglob("*.txt") if path.is_file()),
@@ -82,12 +139,56 @@ class ViewerServer:
             test_lists[0] if test_lists else None,
         )
         return {
-            "checkpoints": [option(path) for path in checkpoints],
+            "checkpoints": checkpoints,
+            "checkpoint_groups": groups,
             "test_lists": [option(path) for path in test_lists],
             "defaults": {
                 "output_dir": str(self.results_root / "cross_eval"),
                 "test_list": str(default_test_list) if default_test_list else "",
             },
+        }
+
+    @staticmethod
+    def _checkpoint_option(
+        path: Path,
+        run_name: str,
+        relative_path: Path,
+    ) -> dict[str, object]:
+        """Describe a checkpoint without changing the path sent to evaluation."""
+        modified_at = path.stat().st_mtime
+        result_match = CHECKPOINT_SCORE_PATTERN.match(path.name)
+        last_save_match = CHECKPOINT_LAST_SAVE_PATTERN.match(path.name)
+        is_last_save = last_save_match is not None
+        scores: dict[str, float | None] = {"et": None, "tc": None, "wt": None}
+        result_name = "Last save" if is_last_save else path.stem
+        if result_match:
+            result_name = f"best_{result_match.group('result')}"
+            scores = {
+                "et": float(result_match.group("et")),
+                "tc": float(result_match.group("tc")),
+                "wt": float(result_match.group("wt")),
+            }
+
+        average_dice = None
+        available_scores = [score for score in scores.values() if score is not None]
+        if len(available_scores) == 3:
+            average_dice = sum(available_scores) / 3
+
+        fold_name = next(
+            (part for part in relative_path.parts if FOLD_PATTERN.match(part)),
+            None,
+        )
+        return {
+            "path": str(path),
+            "name": result_name,
+            "run_name": run_name,
+            "fold_name": fold_name,
+            "filename": path.name,
+            "is_last_save": is_last_save,
+            "scores": scores,
+            "average_dice": average_dice,
+            "last_save_metric": float(last_save_match.group("jc")) if last_save_match else None,
+            "modified_at": modified_at,
         }
 
     def _job_log_tail(self, job: dict[str, object], limit: int = 6000) -> str:
@@ -114,6 +215,23 @@ class ViewerServer:
         if job.get("status") == "completed" and isinstance(summary_path, str) and Path(summary_path).is_file():
             job["summary"] = read_json(Path(summary_path))
         return job
+
+    def rename_eval_job(self, job_id: str, name: str | None) -> dict[str, object]:
+        """Update a display label without changing the internal job identifier."""
+        with self.eval_lock:
+            if job_id not in self.eval_jobs:
+                raise KeyError(job_id)
+            self.eval_jobs[job_id]["name"] = name
+            request = self.eval_jobs[job_id].get("request")
+            if isinstance(request, dict):
+                request["name"] = name
+            manifest_path = self.eval_jobs[job_id].get("manifest_file")
+
+        # A queued job may not have created its manifest yet; the worker will
+        # persist the latest label when it creates one.
+        if isinstance(manifest_path, str) and Path(manifest_path).parent.exists():
+            self._write_eval_manifest(Path(manifest_path), job_id)
+        return self.public_eval_job(job_id)
 
     def _run_evaluation(self, job_id: str, request: EvaluationRequest) -> None:
         output_dir = self._resolve_project_path(Path(request.output_dir))
@@ -288,7 +406,7 @@ class ViewerServer:
         ]
         record: dict[str, object] = {
             "id": job_id,
-            "label": f"Validation · {job_id}",
+            "label": str(job.get("name") or f"Validation · {job_id}"),
             "status": status,
             "created_at": job.get("created_at"),
             "started_at": started_at,
@@ -658,12 +776,15 @@ def create_app(results_root: Path = DEFAULT_RESULTS_ROOT) -> FastAPI:
                     detail=f"Evaluation job {state.active_eval_job} is already running.",
                 )
             state.active_eval_job = job_id
+            evaluation_name = normalize_evaluation_name(request.name)
             state.eval_jobs[job_id] = {
                 "id": job_id,
+                "name": evaluation_name,
                 "status": "queued",
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "pid": None,
                 "request": {
+                    "name": evaluation_name,
                     "checkpoints": resolved_checkpoints,
                     "output_dir": str(output_dir),
                     "test_list": str(test_list),
@@ -676,6 +797,7 @@ def create_app(results_root: Path = DEFAULT_RESULTS_ROOT) -> FastAPI:
             }
 
         normalized_request = request.model_copy(update={
+            "name": evaluation_name,
             "checkpoints": resolved_checkpoints,
             "output_dir": str(output_dir),
             "test_list": str(test_list),
@@ -687,6 +809,14 @@ def create_app(results_root: Path = DEFAULT_RESULTS_ROOT) -> FastAPI:
             daemon=True,
         ).start()
         return state.public_eval_job(job_id)
+
+    @app.patch("/api/eval/jobs/{job_id}")
+    def rename_evaluation(job_id: str, request: EvaluationRenameRequest) -> dict[str, object]:
+        name = normalize_evaluation_name(request.name)
+        try:
+            return state.rename_eval_job(job_id, name)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown evaluation job.") from None
 
     @app.get("/api/validation/runs")
     def validation_runs() -> dict[str, object]:
