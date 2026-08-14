@@ -1,58 +1,48 @@
-import { useState } from "react";
 import MonitorView from "./components/MonitorView.jsx";
 
 function StatusDot({ state }) {
   return <span className={`status-dot ${state}`} aria-hidden="true" />;
 }
 
-export default function App() {
-  const [railCollapsed, setRailCollapsed] = useState(false);
-
+function BrandMark() {
   return (
-    <main className={`app-shell ${railCollapsed ? "rail-collapsed" : ""}`}>
+    <div className="brand-mark" aria-hidden="true">
+      <span />
+      <span />
+      <span />
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <main className="app-shell">
       <aside className="control-rail">
         <div className="brand-block">
-          <div className="brand-mark">H</div>
+          <BrandMark />
           <div>
             <div className="brand-name">HFF-Net</div>
-            <div className="brand-subtitle">BraTS viewer</div>
+            <div className="brand-subtitle">Training monitor</div>
           </div>
-          <button
-            className="rail-toggle"
-            type="button"
-            onClick={() => setRailCollapsed((current) => !current)}
-            aria-label={railCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            title={railCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          >
-            {railCollapsed ? "›" : "‹"}
-          </button>
         </div>
 
         <div className="rail-scroll">
+          <section className="rail-section rail-status-card">
+            <StatusDot state="ready" />
+            <strong>Viewer ready</strong>
+          </section>
+
           <section className="rail-section monitor-rail-note">
-            <div className="section-kicker">Training telemetry</div>
-            <p>Process-scoped RAM and accelerator samples from cross-validation folds.</p>
-            <div className="selected-path">Logs refresh automatically while a fold is running.</div>
+            <div className="rail-section-title"><span className="rail-icon bars" aria-hidden="true"><i /><i /><i /></span>Training telemetry</div>
+            <p>Live and completed fold resource usage.</p>
           </section>
-
-          <section className="rail-section legend-section">
-            <div className="section-kicker">Segmentation labels</div>
-            <div className="legend-row"><span className="legend-swatch core" /> Necrotic / core</div>
-            <div className="legend-row"><span className="legend-swatch edema" /> Edema</div>
-            <div className="legend-row"><span className="legend-swatch enhancing" /> Enhancing tumour</div>
-          </section>
-        </div>
-
-        <div className="rail-footer">
-          <StatusDot state="ready" />
-          <span>Viewer ready</span>
         </div>
       </aside>
 
       <section className="workspace monitor-workspace">
-        <header className="topbar">
-          <div className="breadcrumb"><span>Research workspace</span><span className="crumb-divider">/</span><strong>Training monitor</strong></div>
-        </header>
         <MonitorView />
       </section>
     </main>

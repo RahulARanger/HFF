@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { fetchMonitorRun, fetchMonitorRuns } from "../api.js";
+import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Progress } from "./watermelon-ui.jsx";
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -40,22 +41,54 @@ function formatRelativeTime(value) {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
+function formatDuration(seconds, fallback = "—") {
+  if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))) return fallback;
+  const total = Math.max(0, Math.round(Number(seconds)));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainder = total % 60;
+  if (hours) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  if (minutes) return `${minutes}m ${String(remainder).padStart(2, "0")}s`;
+  return `${remainder}s`;
+}
+
+function formatCompactTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 function StatusBadge({ status }) {
-  return <span className={`monitor-status ${status}`}><span className="monitor-status-dot" />{status}</span>;
+  return <Badge variant="outline" className={`monitor-status ${status}`}><span className="monitor-status-dot" />{status}</Badge>;
+}
+
+function nearestPoint(event, count) {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const ratio = Math.min(Math.max((event.clientX - bounds.left) / bounds.width, 0), 1);
+  return Math.round(ratio * Math.max(count - 1, 0));
 }
 
 function Sparkline({ samples, field, color }) {
-  const values = samples.map((sample) => sample[field]).filter((value) => value !== null && value !== undefined).map(Number).filter(Number.isFinite);
-  if (values.length < 2) return <div className="monitor-chart-empty">Waiting for samples</div>;
+  const points = samples.map((sample, index) => ({ sample, index, value: Number(sample[field]) })).filter(({ value }) => Number.isFinite(value));
+  const [hoveredIndex, setHoveredIndex] = useState(null);
+  if (points.length < 2) return <div className="monitor-chart-empty">Waiting for samples</div>;
+  const values = points.map(({ value }) => value);
   const maximum = Math.max(...values, 1);
   const minimum = Math.min(...values, 0);
   const range = Math.max(maximum - minimum, 1);
-  const points = values.map((value, index) => `${(index / (values.length - 1)) * 100},${92 - ((value - minimum) / range) * 78}`).join(" ");
+  const polyline = points.map(({ value }, index) => `${(index / (points.length - 1)) * 100},${92 - ((value - minimum) / range) * 78}`).join(" ");
+  const hovered = hoveredIndex === null ? null : points[hoveredIndex];
   return (
-    <svg className="monitor-sparkline" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${field} over time`}>
-      <line x1="0" y1="92" x2="100" y2="92" stroke="rgba(128, 155, 173, 0.2)" strokeWidth="1" />
-      <polyline points={points} fill="none" stroke={color} strokeWidth="2.2" vectorEffect="non-scaling-stroke" />
-    </svg>
+    <div className="sparkline-wrap">
+      <svg className="monitor-sparkline" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${field} over time`} onMouseMove={(event) => setHoveredIndex(nearestPoint(event, points.length))} onMouseLeave={() => setHoveredIndex(null)}>
+        <line x1="0" y1="92" x2="100" y2="92" stroke="rgba(128, 155, 173, 0.2)" strokeWidth="1" />
+        <polyline points={polyline} fill="none" stroke={color} strokeWidth="2.2" vectorEffect="non-scaling-stroke" />
+      </svg>
+      {hovered && <div className="graph-tooltip sparkline-tooltip" style={{ left: `${(hoveredIndex / (points.length - 1)) * 100}%` }}>
+        <strong>{formatBytes(hovered.value)}</strong>
+        <span>{formatClock(hovered.sample.timestamp_utc)}</span>
+      </div>}
+    </div>
   );
 }
 
@@ -75,6 +108,7 @@ function formatClock(value) {
 
 function ResourceLane({ item, samples }) {
   const values = samples.map((sample) => Number(sample[item.field])).filter(Number.isFinite);
+  const [hoveredIndex, setHoveredIndex] = useState(null);
   if (!values.length) {
     return <div className="resource-lane resource-lane-empty"><div className="resource-lane-header"><span className="resource-lane-label"><i style={{ background: item.color }} />{item.label}</span><span>Unavailable</span></div></div>;
   }
@@ -94,16 +128,24 @@ function ResourceLane({ item, samples }) {
     .join(" ");
   const lastIndex = samples.map((sample) => Number(sample[item.field])).reduce((last, value, index) => Number.isFinite(value) ? index : last, -1);
   const lastPoint = lastIndex >= 0 ? pointFor(samples[lastIndex], lastIndex) : null;
+  const hoveredSample = hoveredIndex === null ? null : samples[hoveredIndex];
+  const hoveredValue = hoveredSample ? Number(hoveredSample[item.field]) : null;
+  const hoveredPoint = hoveredSample ? pointFor(hoveredSample, hoveredIndex) : null;
   return (
     <div className="resource-lane">
       <div className="resource-lane-header"><span className="resource-lane-label"><i style={{ background: item.color }} />{item.label}</span><span>{formatValue(latest)} · peak {formatValue(maximum)}</span></div>
       <div className="resource-lane-plot">
         <div className="resource-lane-axis"><span>{formatValue(maximum)}</span><span>{item.formatValue === formatBytes ? "0 B" : "0%"}</span></div>
-        <svg className="resource-lane-svg" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${item.label} over time`}>
+        <svg className="resource-lane-svg" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${item.label} over time`} onMouseMove={(event) => setHoveredIndex(nearestPoint(event, samples.length))} onMouseLeave={() => setHoveredIndex(null)}>
           {[18, 54, 90].map((y) => <line key={y} x1="0" y1={y} x2="100" y2={y} stroke="rgba(128, 155, 173, 0.18)" strokeWidth="1" />)}
           <polyline points={points} fill="none" stroke={item.color} strokeWidth="2.4" vectorEffect="non-scaling-stroke" />
           {lastPoint && <circle cx={lastPoint.x} cy={lastPoint.y} r="2.6" fill={item.color} vectorEffect="non-scaling-stroke" />}
+          {hoveredPoint && <line x1={hoveredPoint.x} y1="10" x2={hoveredPoint.x} y2="92" stroke={item.color} strokeOpacity="0.55" strokeDasharray="2 2" vectorEffect="non-scaling-stroke" />}
         </svg>
+        {hoveredSample && Number.isFinite(hoveredValue) && <div className="graph-tooltip resource-tooltip" style={{ left: `${hoveredPoint.x}%` }}>
+          <strong>{formatValue(hoveredValue)}</strong>
+          <span>{formatClock(hoveredSample.timestamp_utc)}</span>
+        </div>}
       </div>
     </div>
   );
@@ -132,15 +174,23 @@ function ResourceDrilldown({ samples }) {
 
 function EpochLineChart({ history }) {
   const rows = history.filter((row) => Number.isFinite(Number(row.epoch)));
+  const [hoveredIndex, setHoveredIndex] = useState(null);
   if (!rows.length) return <div className="monitor-chart-empty epoch-chart-empty">Epoch metrics will appear after the first validation.</div>;
+  const trainLossField = rows.some((row) => Number.isFinite(Number(row.train_loss_supervised_branch_1)))
+    ? "train_loss_supervised_branch_1"
+    : "train_loss_total";
   const series = [
-    { field: "train_loss_total", color: "#43b7e8", label: "Train loss" },
+    { field: trainLossField, color: "#43b7e8", label: "Train loss" },
     { field: "validation_loss_branch_1", color: "#f0a35b", label: "Validation loss" },
   ];
   const values = series.flatMap(({ field }) => rows.map((row) => Number(row[field])).filter(Number.isFinite));
-  const maximum = Math.max(...values, 1);
-  const minimum = Math.min(...values, 0);
-  const range = Math.max(maximum - minimum, 1);
+  const rawMaximum = values.length ? Math.max(...values) : 1;
+  const rawMinimum = values.length ? Math.min(...values) : 0;
+  const rawRange = rawMaximum - rawMinimum;
+  const padding = rawRange > 0 ? rawRange * 0.12 : Math.max(Math.abs(rawMaximum) * 0.12, 0.01);
+  const maximum = rawMaximum + padding;
+  const minimum = Math.max(0, rawMinimum - padding);
+  const range = Math.max(maximum - minimum, Number.EPSILON);
   const pointFor = (field, row, index) => {
     const value = Number(row[field]);
     if (!Number.isFinite(value)) return null;
@@ -153,11 +203,15 @@ function EpochLineChart({ history }) {
     .map(({ x, y }) => `${x},${y}`)
     .filter(Boolean)
     .join(" ");
+  const hoveredRow = hoveredIndex === null ? null : rows[hoveredIndex];
+  const hoveredX = hoveredIndex === null ? null : (rows.length === 1 ? 50 : (hoveredIndex / (rows.length - 1)) * 100);
   return (
-    <div>
+    <div className="epoch-chart-shell">
       <div className="epoch-chart-legend">{series.map((item) => <span key={item.field}><i style={{ background: item.color }} />{item.label}</span>)}</div>
-      <svg className="epoch-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Training and validation loss by epoch">
-        <line x1="0" y1="92" x2="100" y2="92" stroke="rgba(128, 155, 173, 0.2)" strokeWidth="1" />
+      <div className="epoch-chart-plot">
+      <svg className="epoch-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Training and validation loss by epoch" onMouseMove={(event) => setHoveredIndex(nearestPoint(event, rows.length))} onMouseLeave={() => setHoveredIndex(null)}>
+        {[20, 56, 92].map((y) => <line key={y} x1="0" y1={y} x2="100" y2={y} stroke="rgba(128, 155, 173, 0.18)" strokeWidth="1" />)}
+        {hoveredX !== null && <line x1={hoveredX} y1="8" x2={hoveredX} y2="92" stroke="#50e3c2" strokeOpacity="0.65" strokeDasharray="2 2" vectorEffect="non-scaling-stroke" />}
         {series.map((item) => (
           <g key={item.field}>
             <polyline points={pointsFor(item.field)} fill="none" stroke={item.color} strokeWidth="2" vectorEffect="non-scaling-stroke" />
@@ -168,6 +222,12 @@ function EpochLineChart({ history }) {
           </g>
         ))}
       </svg>
+      {hoveredRow && <div className="graph-tooltip epoch-tooltip" style={{ left: `${hoveredX}%` }}>
+        <strong>Epoch {hoveredRow.epoch}</strong>
+        {series.map((item) => Number.isFinite(Number(hoveredRow[item.field])) && <span key={item.field}><i style={{ background: item.color }} />{item.label}: {Number(hoveredRow[item.field]).toFixed(4)}</span>)}
+      </div>}
+      </div>
+      <div className="epoch-chart-axis" aria-hidden="true">{rows.map((row) => <span key={row.epoch}>Epoch {row.epoch}</span>)}</div>
     </div>
   );
 }
@@ -233,14 +293,47 @@ function EpochProgress({ training }) {
   const pending = training?.pending_epochs;
   const percent = training?.progress_percent ?? 0;
   return (
-    <section className="epoch-progress-card">
+    <Card className="epoch-progress-card">
       <div className="epoch-progress-heading">
         <div><div className="monitor-metric-label">Epoch progress</div><strong>{completed} / {total ?? "—"} epochs</strong></div>
         <div className="epoch-progress-pending">{pending === null || pending === undefined ? "Pending unavailable" : `${pending} pending`}<span>{percent}%</span></div>
       </div>
-      <div className="epoch-progress-track"><span style={{ width: `${Math.min(Math.max(percent, 0), 100)}%` }} /></div>
+      <Progress value={percent} className="epoch-progress-track" />
       <div className="epoch-progress-caption">Progress is based on completed validation epochs recorded in <code>training_metrics.json</code>.</div>
-    </section>
+    </Card>
+  );
+}
+
+function SummaryCard({ label, value, total, tone, progress }) {
+  return (
+    <Card className={`summary-card ${tone}`}>
+      <div className="summary-card-label"><span className="summary-dot" />{label}</div>
+      <div className="summary-card-value"><strong>{value}</strong><span>/ {total ?? "—"}</span></div>
+      <Progress value={progress} className="summary-progress" />
+    </Card>
+  );
+}
+
+function RunTiming({ detail }) {
+  const timing = detail.timing || {};
+  const isRunning = detail.status === "running";
+  return (
+    <Card className="run-timing-card">
+      <CardHeader className="run-timing-header">
+        <div>
+          <CardTitle>Run timing</CardTitle>
+          <div className="wm-card-description">{isRunning ? "Live estimate based on completed epochs" : "Recorded execution window"}</div>
+        </div>
+        <Badge variant={isRunning ? "default" : "secondary"}>{isRunning ? "ETA" : "Completed"}</Badge>
+      </CardHeader>
+      <CardContent className="run-timing-grid">
+        <div><span>Started</span><strong title={timing.started_at ? formatTime(timing.started_at) : "—"}>{timing.started_at ? formatCompactTime(timing.started_at) : "—"}</strong></div>
+        <div><span>Ended</span><strong title={timing.ended_at ? formatTime(timing.ended_at) : "In progress"}>{timing.ended_at ? formatCompactTime(timing.ended_at) : "In progress"}</strong></div>
+        <div><span>Elapsed</span><strong>{timing.elapsed_display || formatDuration(timing.elapsed_seconds)}</strong></div>
+        <div className={isRunning ? "run-timing-estimate" : ""}><span>{isRunning ? "Estimated remaining" : "Estimated total"}</span><strong>{isRunning ? (timing.estimated_remaining_display || formatDuration(timing.estimated_remaining_seconds, "Calculating…")) : (timing.elapsed_display || formatDuration(timing.elapsed_seconds))}</strong></div>
+      </CardContent>
+      {isRunning && timing.estimated_total_display && <div className="run-timing-footnote">Estimated total duration: {timing.estimated_total_display} · based on {timing.estimate_source || "current progress"}</div>}
+    </Card>
   );
 }
 
@@ -256,35 +349,38 @@ function EpochDrilldown({ training }) {
   );
 }
 
-function MetricCard({ label, value, detail, children, tone = "blue" }) {
+function MetricCard({ label, value, children, tone = "blue" }) {
   return (
-    <article className={`monitor-metric-card ${tone}`}>
-      <div className="monitor-metric-label">{label}</div>
-      <div className="monitor-metric-value">{value}</div>
-      <div className="monitor-metric-detail">{detail}</div>
+    <Card className={`monitor-metric-card ${tone}`}>
+      <div className="monitor-metric-card-header">
+        <div className="monitor-metric-label">{label}</div>
+        <div className="monitor-metric-value">{value}</div>
+      </div>
       {children}
-    </article>
+    </Card>
   );
 }
 
 function RunCard({ run, selected, onClick }) {
   const latest = run.latest || {};
   const training = run.training || {};
+  const completed = Number(training.completed_epochs) || 0;
+  const total = Number(training.total_epochs) || 0;
+  const progress = Number(training.progress_percent) || (total ? (completed / total) * 100 : 0);
+  const runId = String(run.id || "").split("/").at(-1)?.slice(0, 6) || "—";
   return (
-    <button className={`monitor-run-card ${selected ? "selected" : ""}`} onClick={onClick}>
+    <button className={`monitor-run-card ${selected ? "selected" : ""}`} type="button" onClick={onClick}>
       <div className="monitor-run-card-topline">
         <span className="monitor-run-label">{run.fold}</span>
         <StatusBadge status={run.status} />
       </div>
-      <div className="monitor-run-card-meta">
-        <span>{String(run.backend).toUpperCase()}</span>
-        <span>{run.sample_count} samples</span>
-      </div>
+      <div className="monitor-run-card-meta"><span>{runId}</span><span className="run-arrow">›</span></div>
+      <div className="run-progress-line"><span style={{ width: `${Math.min(Math.max(progress, 0), 100)}%` }} /></div>
+      <div className="monitor-run-card-epochs"><span>{completed} / {total || "—"} epochs</span><span>{Math.round(progress)}%</span></div>
       <div className="monitor-run-card-values">
         <span>RAM <strong>{formatBytes(latest.ram_rss_bytes)}</strong></span>
         <span>VRAM <strong>{formatBytes(latest.gpu_memory_bytes)}</strong></span>
       </div>
-      <div className="monitor-run-card-epochs"><span>Epochs <strong>{training.completed_epochs ?? 0} / {training.total_epochs ?? "—"}</strong></span><span>{training.pending_epochs ?? "—"} pending</span></div>
     </button>
   );
 }
@@ -321,9 +417,10 @@ export default function MonitorView() {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
-  const [showResourceDetail, setShowResourceDetail] = useState(false);
-  const [showEpochDetail, setShowEpochDetail] = useState(false);
+  const [showResourceDetail, setShowResourceDetail] = useState(true);
+  const [showEpochDetail, setShowEpochDetail] = useState(true);
   const [expandedGroups, setExpandedGroups] = useState(() => new Set());
+  const groupsInitialized = useRef(false);
   const groups = useMemo(() => {
     const grouped = new Map();
     runs.forEach((run) => {
@@ -347,9 +444,7 @@ export default function MonitorView() {
     if (!groups.length) return;
     setExpandedGroups((current) => {
       const available = new Set(groups.map((group) => group.key));
-      const next = new Set([...current].filter((key) => available.has(key)));
-      if (!next.size) next.add(groups[0].key);
-      return next;
+      return new Set([...current].filter((key) => available.has(key)));
     });
   }, [groups]);
 
@@ -366,6 +461,11 @@ export default function MonitorView() {
     const payload = await fetchMonitorRuns();
     const nextRuns = payload.runs || [];
     setRuns(nextRuns);
+    if (!groupsInitialized.current && nextRuns.length) {
+      const firstGroupKey = nextRuns[0].group_id || nextRuns[0].run_name || nextRuns[0].id;
+      setExpandedGroups(new Set([firstGroupKey]));
+      groupsInitialized.current = true;
+    }
     setSelectedId((current) => current && nextRuns.some((run) => run.id === current) ? current : nextRuns[0]?.id || "");
     return nextRuns;
   }, []);
@@ -417,10 +517,11 @@ export default function MonitorView() {
   const completedCount = runs.filter((run) => run.status === "completed").length;
   const epochsCompleted = runs.reduce((total, run) => total + (run.training?.completed_epochs || 0), 0);
   const epochsPending = runs.reduce((total, run) => total + (run.training?.pending_epochs || 0), 0);
+  const totalEpochs = runs.reduce((total, run) => total + (Number(run.training?.total_epochs) || 0), 0);
+  const totalRuns = Math.max(runs.length, 1);
+  const epochDenominator = Math.max(totalEpochs, epochsCompleted + epochsPending, 1);
   const samples = detail?.samples || [];
   const latest = detail?.latest || {};
-  const gpuUnavailable = latest.gpu_memory_bytes === null || latest.gpu_memory_bytes === undefined;
-  const peakGpu = detail?.peak?.gpu_memory_bytes ?? latest.gpu_memory_bytes;
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
@@ -437,22 +538,20 @@ export default function MonitorView() {
   return (
     <section className="monitor-page" aria-label="Training monitor">
       <header className="monitor-header">
-        <div>
-          <div className="monitor-kicker">Cross-validation telemetry</div>
+        <div className="monitor-heading-copy">
           <h1>Training monitor</h1>
-          <p>Live and completed fold resource usage from the process-scoped monitors.</p>
         </div>
         <div className="monitor-header-actions">
           <span className="monitor-refresh-state"><span className="monitor-live-pulse" /> Auto-refresh · 5s</span>
-          <button className="monitor-refresh-button" onClick={handleRefresh} disabled={refreshing}>{refreshing ? "Refreshing…" : "Refresh now"}</button>
+          <Button variant="outline" className="monitor-refresh-button" onClick={handleRefresh} disabled={refreshing}>{refreshing ? "Refreshing…" : "Refresh now"}</Button>
         </div>
       </header>
 
       <div className="monitor-summary-strip">
-        <div><span className="monitor-summary-label">Active folds</span><strong>{activeCount}</strong></div>
-        <div><span className="monitor-summary-label">Completed folds</span><strong>{completedCount}</strong></div>
-        <div><span className="monitor-summary-label">Epochs completed</span><strong>{epochsCompleted}</strong></div>
-        <div><span className="monitor-summary-label">Epochs pending</span><strong>{epochsPending}</strong></div>
+        <SummaryCard label="Active folds" value={activeCount} total={runs.length || "—"} progress={(activeCount / totalRuns) * 100} tone="blue" />
+        <SummaryCard label="Completed folds" value={completedCount} total={runs.length || "—"} progress={(completedCount / totalRuns) * 100} tone="teal" />
+        <SummaryCard label="Epochs completed" value={epochsCompleted} total={totalEpochs || "—"} progress={(epochsCompleted / epochDenominator) * 100} tone="teal" />
+        <SummaryCard label="Epochs pending" value={epochsPending} total={totalEpochs || "—"} progress={(epochsPending / epochDenominator) * 100} tone="muted" />
       </div>
 
       {error && <div className="app-alert monitor-alert">{error}</div>}
@@ -473,28 +572,31 @@ export default function MonitorView() {
                 </div>
                 <div className="monitor-detail-status">
                   <StatusBadge status={detail.status} />
+                  <span>Duration {detail.timing?.elapsed_display || formatDuration(detail.timing?.elapsed_seconds)}</span>
                   <span>Started {formatRelativeTime(detail.started_at)}</span>
                   <span>Updated {formatTime(detail.updated_at)}</span>
                 </div>
               </header>
 
               <div className="monitor-metrics-grid">
-                <MetricCard label="RAM RSS" value={formatBytes(latest.ram_rss_bytes)} detail={`Peak ${formatBytes(detail.peak?.ram_rss_bytes)}`} tone="blue">
+                <MetricCard label="RAM RSS" value={formatBytes(latest.ram_rss_bytes)} tone="blue">
                   <Sparkline samples={samples} field="ram_rss_bytes" color="#43b7e8" />
                 </MetricCard>
-                <MetricCard label="RAM USS" value={formatBytes(latest.ram_uss_bytes)} detail={`Peak ${formatBytes(detail.peak?.ram_uss_bytes)}`} tone="violet">
+                <MetricCard label="RAM USS" value={formatBytes(latest.ram_uss_bytes)} tone="violet">
                   <Sparkline samples={samples} field="ram_uss_bytes" color="#9b8cff" />
                 </MetricCard>
-                <MetricCard label="VRAM" value={formatBytes(latest.gpu_memory_bytes)} detail={gpuUnavailable ? "NVML telemetry unavailable" : `Peak ${formatBytes(peakGpu)}`} tone="orange">
+                <MetricCard label="VRAM" value={formatBytes(latest.gpu_memory_bytes)} tone="orange">
                   <Sparkline samples={samples} field="gpu_memory_bytes" color="#f0a35b" />
                 </MetricCard>
               </div>
 
-              <div className="monitor-drilldown-toggle"><span>RAM / VRAM resource history</span><button className="monitor-refresh-button" onClick={() => setShowResourceDetail((current) => !current)}>{showResourceDetail ? "Hide resource drilldown" : "Open resource drilldown"}</button></div>
+              <RunTiming detail={detail} />
+
+              <div className="monitor-drilldown-toggle"><span>Resource timeline</span><Button variant="outline" className="monitor-refresh-button" onClick={() => setShowResourceDetail((current) => !current)}>{showResourceDetail ? "Hide timeline" : "Open timeline"}</Button></div>
               {showResourceDetail && <ResourceDrilldown samples={samples} />}
 
               <EpochProgress training={detail.training} />
-              <div className="monitor-drilldown-toggle"><span>Epoch-level training history</span><button className="monitor-refresh-button" onClick={() => setShowEpochDetail((current) => !current)}>{showEpochDetail ? "Hide drilldown" : "Open drilldown"}</button></div>
+              <div className="monitor-drilldown-toggle"><span>Epoch timeline</span><Button variant="outline" className="monitor-refresh-button" onClick={() => setShowEpochDetail((current) => !current)}>{showEpochDetail ? "Hide timeline" : "Open timeline"}</Button></div>
               {showEpochDetail && <EpochDrilldown training={detail.training} />}
 
               <div className="monitor-detail-grid">
@@ -510,11 +612,6 @@ export default function MonitorView() {
                     <div><dt>Last sample</dt><dd>{formatTime(latest.timestamp_utc)}</dd></div>
                     <div><dt>Log file</dt><dd className="monitor-path" title={detail.resource_log}>{detail.resource_log}</dd></div>
                   </dl>
-                </section>
-                <section className="monitor-data-panel monitor-note-panel">
-                  <div className="monitor-panel-heading"><span>Telemetry note</span><span className="monitor-note-mark">i</span></div>
-                  <p>{gpuUnavailable ? "RAM samples are available, but the NVIDIA process query did not return VRAM for this run. Check the training job output for the NVML warning and verify nvidia-ml-py is installed in the job environment." : "VRAM is limited to the selected training process tree. Other processes sharing the device are excluded."}</p>
-                  <div className="monitor-process-line"><span className="monitor-live-pulse" /> {detail.process_visible ? "Training process visible on this host" : detail.status === "completed" ? "Training process exited normally" : "Process is not visible from this viewer host"}</div>
                 </section>
               </div>
             </>

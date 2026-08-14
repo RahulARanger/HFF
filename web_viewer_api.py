@@ -84,6 +84,30 @@ def monitor_value_peak(samples: list[dict[str, object]], field: str) -> int | No
     return max(numeric) if numeric else None
 
 
+def seconds_between(start: str | None, end: str | None) -> float | None:
+    """Return an ISO timestamp delta when both timestamps are valid."""
+    if not start or not end:
+        return None
+    try:
+        delta = (datetime.fromisoformat(end.replace("Z", "+00:00")) - datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    return max(delta, 0.0)
+
+
+def timing_display(seconds: float | None) -> str | None:
+    if seconds is None:
+        return None
+    total = int(round(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
 def training_metrics_file(log_path: Path) -> Path | None:
     """Find the metrics written beside the checkpoint for this fold."""
     candidate = log_path.parent / "training_metrics.json"
@@ -184,6 +208,25 @@ def monitor_record(
     ) or summary.get("completed_at_utc")
     if fold_completed_at is None and has_summary:
         fold_completed_at = datetime.fromtimestamp(summary_path.stat().st_mtime, timezone.utc).isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    elapsed_seconds = seconds_between(fold_started_at, fold_completed_at or now_iso)
+    completed_progress = progress.get("progress_percent")
+    estimated_total_seconds: float | None = None
+    estimated_remaining_seconds: float | None = None
+    history = progress.get("history", [])
+    if isinstance(history, list):
+        epoch_durations = [
+            float(row["epoch_seconds"])
+            for row in history
+            if isinstance(row, dict) and isinstance(row.get("epoch_seconds"), (int, float)) and float(row["epoch_seconds"]) > 0
+        ]
+        pending_epochs = progress.get("pending_epochs")
+        if epoch_durations and isinstance(pending_epochs, int) and pending_epochs > 0:
+            estimated_remaining_seconds = sum(epoch_durations[-5:]) / min(len(epoch_durations), 5) * pending_epochs
+            estimated_total_seconds = (elapsed_seconds or 0.0) + estimated_remaining_seconds
+    if estimated_remaining_seconds is None and not has_summary and isinstance(completed_progress, (int, float)) and completed_progress > 0 and elapsed_seconds is not None:
+        estimated_total_seconds = elapsed_seconds / (float(completed_progress) / 100.0)
+        estimated_remaining_seconds = max(estimated_total_seconds - elapsed_seconds, 0.0)
     group_id = manifest_path.relative_to(results_root).as_posix() if manifest_path else log_path.relative_to(results_root).as_posix()
     group_started_at = manifest.get("created_at_utc") or fold_started_at
     group_completed_at = manifest.get("completed_at_utc")
@@ -204,6 +247,17 @@ def monitor_record(
         "group_completed_at": group_completed_at,
         "started_at": fold_started_at,
         "completed_at": fold_completed_at,
+        "timing": {
+            "started_at": fold_started_at,
+            "ended_at": fold_completed_at,
+            "elapsed_seconds": elapsed_seconds,
+            "elapsed_display": timing_display(elapsed_seconds),
+            "estimated_total_seconds": estimated_total_seconds,
+            "estimated_total_display": timing_display(estimated_total_seconds),
+            "estimated_remaining_seconds": estimated_remaining_seconds,
+            "estimated_remaining_display": timing_display(estimated_remaining_seconds),
+            "estimate_source": "recent epoch durations" if isinstance(history, list) and history and estimated_remaining_seconds is not None and any(isinstance(row, dict) and isinstance(row.get("epoch_seconds"), (int, float)) for row in history) else "progress rate",
+        },
         "backend": latest.get("backend") or summary.get("backend") or "unknown",
         "status": status,
         "updated_at": latest.get("timestamp_utc") or modified_at.isoformat(),
