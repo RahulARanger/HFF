@@ -222,6 +222,8 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .evaluation-result-panel-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
 .evaluation-result-panel-heading strong { color: #dce9ee; font-size: 11px; }
 .evaluation-result-panel-heading code { overflow: hidden; color: #7898aa; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.evaluation-table-copy-button { flex: 0 0 auto; min-height: 26px; padding: 0 9px; border: 1px solid #2b5268; border-radius: 4px; color: #bfe8f5; background: rgba(38, 132, 174, 0.12); font-size: 9px; font-weight: 700; cursor: pointer; }
+.evaluation-table-copy-button:hover { border-color: var(--teal); color: #ffffff; background: rgba(80, 227, 194, 0.12); }
 .evaluation-results-table-wrap, .evaluation-loss-table-wrap { overflow-x: auto; border: 1px solid #203442; }
 .evaluation-results-table, .evaluation-loss-table { width: 100%; border-collapse: collapse; color: #a9bac4; font-size: 9px; white-space: nowrap; }
 .evaluation-results-table { min-width: 650px; }

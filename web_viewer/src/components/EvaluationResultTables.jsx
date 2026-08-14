@@ -88,8 +88,50 @@ function shortPath(value) {
   return parts.length > 3 ? `…/${parts.slice(-3).join("/")}` : value;
 }
 
+function resultTableText(tab) {
+  const rows = metricRows(tab.metrics);
+  const lines = [
+    tab.label,
+    ...(tab.checkpoint ? [`Checkpoint\t${tab.checkpoint}`] : []),
+    "",
+    "Region\tLF Dice\tLF Jaccard\tLF HD95\tHF Dice\tHF Jaccard\tHF HD95",
+    ...rows.map((row) => [
+      row.label,
+      formatMetric(tab.metrics?.branch_1?.[row.metricIndex * 2]),
+      formatMetric(tab.jaccard?.branch_1?.[row.metricIndex]),
+      formatMetric(tab.metrics?.branch_1?.[row.metricIndex * 2 + 1]),
+      formatMetric(tab.metrics?.branch_2?.[row.metricIndex * 2]),
+      formatMetric(tab.jaccard?.branch_2?.[row.metricIndex]),
+      formatMetric(tab.metrics?.branch_2?.[row.metricIndex * 2 + 1]),
+    ].join("\t")),
+    "",
+    "Branch\tLoss",
+    `LF\t${formatMetric(tab.losses?.validation_loss_branch_1)}`,
+    `HF\t${formatMetric(tab.losses?.validation_loss_branch_2)}`,
+  ];
+  return lines.join("\n");
+}
+
+async function copyText(value) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textArea = document.createElement("textarea");
+  textArea.value = value;
+  textArea.setAttribute("readonly", "");
+  textArea.style.position = "fixed";
+  textArea.style.opacity = "0";
+  document.body.appendChild(textArea);
+  textArea.select();
+  const copied = document.execCommand("copy");
+  textArea.remove();
+  if (!copied) throw new Error("Copy is not available in this browser.");
+}
+
 export function EvaluationResultTabs({ summary, className = "" }) {
   const [activeTab, setActiveTab] = useState("average");
+  const [copyState, setCopyState] = useState("idle");
   const results = summary?.results || [];
   const tabs = [
     {
@@ -112,6 +154,16 @@ export function EvaluationResultTabs({ summary, className = "" }) {
     })),
   ];
   const selected = tabs.find((tab) => tab.id === activeTab) || tabs[0];
+  const handleCopy = async () => {
+    try {
+      await copyText(resultTableText(selected));
+      setCopyState("copied");
+      window.setTimeout(() => setCopyState("idle"), 1800);
+    } catch {
+      setCopyState("failed");
+      window.setTimeout(() => setCopyState("idle"), 2400);
+    }
+  };
 
   return (
     <section className={`evaluation-results ${className}`} aria-label="Evaluation results">
@@ -139,6 +191,9 @@ export function EvaluationResultTabs({ summary, className = "" }) {
         <div className="evaluation-result-panel-heading">
           <strong>{selected.label}</strong>
           {selected.checkpoint && <code title={selected.checkpoint}>{selected.checkpoint}</code>}
+          <button type="button" className="evaluation-table-copy-button" onClick={handleCopy}>
+            {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy table"}
+          </button>
         </div>
         <MetricResultsTable metrics={selected.metrics} jaccard={selected.jaccard} />
         <LossResultsTable losses={selected.losses} />
