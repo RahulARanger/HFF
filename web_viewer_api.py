@@ -582,14 +582,11 @@ class ViewerServer:
         return sources
 
     def delete_validation_run(self, run_id: str) -> dict[str, object]:
-        """Delete monitor telemetry for a finished validation without touching results."""
+        """Delete monitor telemetry without cancelling the evaluation or touching results."""
         source = self.validation_sources().get(run_id)
         if source is None:
             raise KeyError(run_id)
         log_path, job = source
-        if job.get("status") in {"queued", "running"}:
-            raise RuntimeError("Stop the running evaluation before deleting its validation telemetry.")
-
         artifact_paths: list[Path] = []
         manifest_value = job.get("manifest_file")
         if isinstance(manifest_value, str):
@@ -661,7 +658,12 @@ def read_json(path: Path) -> dict[str, object]:
 
 def is_validation_resource_log(path: Path) -> bool:
     """Keep web-triggered validation telemetry out of the training monitor."""
-    return any(path.parent.glob("validation_job_*.json"))
+    if any(part.startswith("validation_monitor_") for part in path.parts):
+        return True
+    return any(
+        any(directory.glob("validation_job_*.json"))
+        for directory in (path.parent, *path.parents)
+    )
 
 
 def monitor_manifest(log_path: Path, results_root: Path) -> Path | None:
