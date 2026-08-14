@@ -48,3 +48,31 @@ export async function fetchMonitorRuns() {
 export async function fetchMonitorRun(runId, limit = 240) {
   return fetchJson(`/monitor/runs/${runId.split("/").map(encodeURIComponent).join("/")}?limit=${limit}`);
 }
+
+export async function fetchEvaluationOptions() {
+  return fetchJson("/eval/options");
+}
+
+export async function fetchEvaluationJobs() {
+  return fetchJson("/eval/jobs");
+}
+
+export async function fetchEvaluationJob(jobId) {
+  return fetchJson(`/eval/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function startEvaluation(request) {
+  return fetchJson("/eval/jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function fetchValidationRuns() {
+  return fetchJson("/validation/runs");
+}
+
+export async function fetchValidationRun(runId) {
+  return fetchJson(`/validation/runs/${encodeURIComponent(runId)}`);
+}

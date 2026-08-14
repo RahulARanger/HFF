@@ -8,10 +8,19 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import subprocess
+import sys
+import threading
+import uuid
+from typing import Literal
 
 import psutil
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from utils.resource_monitor import ResourceMonitor
+from utils.utils import get_device
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -19,17 +28,316 @@ DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "result"
 MONITOR_LOG_SUFFIX = "_resource_usage.jsonl"
 MONITOR_SUMMARY_SUFFIX = "_resource_summary.json"
 FOLD_PATTERN = re.compile(r"^fold_(\d+)$")
+EVAL_JOB_LOG_SUFFIX = ".log"
+
+
+class EvaluationRequest(BaseModel):
+    """Validated inputs accepted by the web evaluation form."""
+
+    checkpoints: list[str] = Field(min_length=1)
+    output_dir: str = Field(min_length=1)
+    test_list: str = Field(min_length=1)
+    dataset_name: Literal["brats19", "brats20", "brats23men", "msdbts"] = "brats19"
+    class_type: Literal["all"] = "all"
+    batch_size: int = Field(default=1, ge=1, le=32)
+    num_workers: int = Field(default=3, ge=0, le=64)
+    resource_monitor_interval: float = Field(default=5.0, gt=0.0, le=300.0)
 
 
 class ViewerServer:
     def __init__(self, results_root: Path) -> None:
         self.results_root = self._resolve_project_path(results_root)
+        self.eval_jobs: dict[str, dict[str, object]] = {}
+        self.eval_lock = threading.Lock()
+        self.active_eval_job: str | None = None
 
     @staticmethod
     def _resolve_project_path(path: Path) -> Path:
         """Resolve relative CLI paths from the repository, not the shell cwd."""
         expanded = path.expanduser()
         return (PROJECT_ROOT / expanded if not expanded.is_absolute() else expanded).resolve()
+
+    def evaluation_options(self) -> dict[str, object]:
+        """Return discoverable checkpoints and test manifests for the web form."""
+        checkpoints = sorted(
+            (path for path in self.results_root.rglob("*.pth") if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        ) if self.results_root.exists() else []
+        dataset_root = PROJECT_ROOT / "dataset"
+        test_lists = sorted(
+            (path for path in dataset_root.rglob("*.txt") if path.is_file()),
+            key=lambda path: (path.name != "testing.txt", str(path)),
+        ) if dataset_root.exists() else []
+
+        def option(path: Path) -> dict[str, str]:
+            try:
+                label = path.relative_to(PROJECT_ROOT).as_posix()
+            except ValueError:
+                label = str(path)
+            return {"path": str(path), "label": label}
+
+        default_test_list = next(
+            (path for path in test_lists if path.name == "testing.txt"),
+            test_lists[0] if test_lists else None,
+        )
+        return {
+            "checkpoints": [option(path) for path in checkpoints],
+            "test_lists": [option(path) for path in test_lists],
+            "defaults": {
+                "output_dir": str(self.results_root / "cross_eval"),
+                "test_list": str(default_test_list) if default_test_list else "",
+            },
+        }
+
+    def _job_log_tail(self, job: dict[str, object], limit: int = 6000) -> str:
+        log_path = job.get("log_file")
+        if not isinstance(log_path, str):
+            return ""
+        try:
+            return Path(log_path).read_text(encoding="utf-8", errors="replace")[-limit:]
+        except OSError:
+            return ""
+
+    def _write_eval_manifest(self, manifest_path: Path, job_id: str) -> None:
+        """Persist enough metadata to rediscover validation telemetry after restart."""
+        with self.eval_lock:
+            payload = dict(self.eval_jobs[job_id])
+        payload.pop("log_tail", None)
+        manifest_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    def public_eval_job(self, job_id: str) -> dict[str, object]:
+        with self.eval_lock:
+            job = dict(self.eval_jobs[job_id])
+        job["log_tail"] = self._job_log_tail(job)
+        summary_path = job.get("summary_file")
+        if job.get("status") == "completed" and isinstance(summary_path, str) and Path(summary_path).is_file():
+            job["summary"] = read_json(Path(summary_path))
+        return job
+
+    def _run_evaluation(self, job_id: str, request: EvaluationRequest) -> None:
+        output_dir = self._resolve_project_path(Path(request.output_dir))
+        checkpoint_list_path = output_dir / f"checkpoint_list_{job_id}.txt"
+        log_path = output_dir / f"cross_eval_{job_id}{EVAL_JOB_LOG_SUFFIX}"
+        summary_path = output_dir / "cross_eval_summary.json"
+        manifest_path = output_dir / f"validation_job_{job_id}.json"
+
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint_list_path.write_text(
+                "\n".join(request.checkpoints) + "\n", encoding="utf-8"
+            )
+            command = [
+                sys.executable,
+                str(PROJECT_ROOT / "cross_eval.py"),
+                "--checkpoint_list", str(checkpoint_list_path),
+                "--test_list", str(self._resolve_project_path(Path(request.test_list))),
+                "--dataset_name", request.dataset_name,
+                "--class_type", request.class_type,
+                "--batch_size", str(request.batch_size),
+                "--num_workers", str(request.num_workers),
+                "--output_dir", str(output_dir),
+            ]
+        except OSError as exc:
+            with self.eval_lock:
+                self.eval_jobs[job_id].update({
+                    "status": "failed",
+                    "return_code": -1,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "error": str(exc),
+                    "log_file": str(log_path),
+                    "summary_file": str(summary_path),
+                    "checkpoint_list_file": str(checkpoint_list_path),
+                    "manifest_file": str(manifest_path),
+                })
+                if self.active_eval_job == job_id:
+                    self.active_eval_job = None
+            return
+
+        with self.eval_lock:
+            self.eval_jobs[job_id].update({
+                "status": "running",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "pid": None,
+                "command": command,
+                "log_file": str(log_path),
+                "summary_file": str(summary_path),
+                "checkpoint_list_file": str(checkpoint_list_path),
+                "manifest_file": str(manifest_path),
+                "resource_monitor_interval": request.resource_monitor_interval,
+            })
+        self._write_eval_manifest(manifest_path, job_id)
+
+        return_code = -1
+        resource_monitor: ResourceMonitor | None = None
+        monitor_error: str | None = None
+        try:
+            with log_path.open("w", encoding="utf-8") as log_file:
+                process = subprocess.Popen(
+                    command,
+                    cwd=PROJECT_ROOT,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                with self.eval_lock:
+                    self.eval_jobs[job_id]["pid"] = process.pid
+                    self.eval_jobs[job_id]["resource_monitoring"] = "starting"
+                self._write_eval_manifest(manifest_path, job_id)
+                try:
+                    resource_monitor = ResourceMonitor(
+                        device=get_device(),
+                        output_directory=output_dir,
+                        interval_seconds=request.resource_monitor_interval,
+                        root_pid=process.pid,
+                    ).start()
+                    with self.eval_lock:
+                        self.eval_jobs[job_id]["resource_monitoring"] = "enabled"
+                        self.eval_jobs[job_id]["resource_backend"] = resource_monitor.backend
+                        self.eval_jobs[job_id]["resource_log"] = str(resource_monitor.output_path)
+                        self.eval_jobs[job_id]["resource_summary_file"] = str(resource_monitor.summary_path)
+                except Exception as exc:  # Monitoring must never prevent evaluation.
+                    monitor_error = str(exc)
+                    with self.eval_lock:
+                        self.eval_jobs[job_id]["resource_monitoring"] = "unavailable"
+                        self.eval_jobs[job_id]["resource_monitor_error"] = monitor_error
+                self._write_eval_manifest(manifest_path, job_id)
+                return_code = process.wait()
+            status = "completed" if return_code == 0 else "failed"
+            error = None if return_code == 0 else f"cross_eval.py exited with code {return_code}."
+        except OSError as exc:
+            status = "failed"
+            error = str(exc)
+        finally:
+            if resource_monitor is not None:
+                try:
+                    resource_monitor.stop()
+                except Exception as exc:  # Persist the job even if final telemetry flush fails.
+                    monitor_error = str(exc)
+
+        with self.eval_lock:
+            self.eval_jobs[job_id].update({
+                "status": status,
+                "return_code": return_code,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "error": error,
+                "log_file": str(log_path),
+                "summary_file": str(summary_path),
+                "checkpoint_list_file": str(checkpoint_list_path),
+                "manifest_file": str(manifest_path),
+                "resource_monitoring": "enabled" if resource_monitor is not None else "unavailable",
+                "resource_monitor_error": monitor_error,
+            })
+            if resource_monitor is not None:
+                self.eval_jobs[job_id]["resource_log"] = str(resource_monitor.output_path)
+                self.eval_jobs[job_id]["resource_summary_file"] = str(resource_monitor.summary_path)
+            if self.active_eval_job == job_id:
+                self.active_eval_job = None
+        self._write_eval_manifest(manifest_path, job_id)
+
+    def _validation_record(
+        self,
+        job_id: str,
+        log_path: Path,
+        job: dict[str, object],
+        *,
+        include_samples: bool = False,
+    ) -> dict[str, object]:
+        """Build a validation-only resource record for the monitor view."""
+        resource_log_value = job.get("resource_log")
+        if isinstance(resource_log_value, str):
+            log_path = Path(resource_log_value)
+        summary_value = job.get("resource_summary_file")
+        if isinstance(summary_value, str):
+            summary_path = Path(summary_value)
+        elif log_path.name.endswith(MONITOR_LOG_SUFFIX):
+            summary_path = log_path.with_name(
+                log_path.name.replace(MONITOR_LOG_SUFFIX, MONITOR_SUMMARY_SUFFIX)
+            )
+        else:
+            summary_path = log_path.with_name("resource_summary_unavailable.json")
+        samples = read_jsonl_tail(log_path, 240 if include_samples else 60)
+        summary = read_json(summary_path)
+        latest = samples[-1] if samples else {}
+        request = job.get("request", {}) if isinstance(job.get("request"), dict) else {}
+        persisted_status = job.get("status")
+        status = str(persisted_status or ("completed" if summary else "stale"))
+        started_at = job.get("started_at") or summary.get("started_at_utc") or (
+            samples[0].get("timestamp_utc") if samples else None
+        )
+        completed_at = job.get("completed_at") or summary.get("completed_at_utc")
+        root_pid = latest.get("root_pid") or summary.get("root_pid") or job.get("pid")
+        process_visible = bool(root_pid and psutil.pid_exists(int(root_pid)))
+        modified_at = log_path.stat().st_mtime if log_path.is_file() else None
+        updated_at = latest.get("timestamp_utc") or (
+            datetime.fromtimestamp(modified_at, timezone.utc).isoformat()
+            if modified_at else job.get("created_at")
+        )
+        elapsed = seconds_between(
+            started_at if isinstance(started_at, str) else None,
+            completed_at if isinstance(completed_at, str) else datetime.now(timezone.utc).isoformat(),
+        )
+        peak_cpu_values = [
+            float(sample["cpu_utilization_percent"])
+            for sample in samples
+            if isinstance(sample.get("cpu_utilization_percent"), (int, float))
+        ]
+        record: dict[str, object] = {
+            "id": job_id,
+            "label": f"Validation · {job_id}",
+            "status": status,
+            "created_at": job.get("created_at"),
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "updated_at": updated_at,
+            "timing": {
+                "started_at": started_at,
+                "ended_at": completed_at,
+                "elapsed_seconds": elapsed,
+                "elapsed_display": timing_display(elapsed),
+            },
+            "backend": latest.get("backend") or summary.get("backend") or job.get("resource_backend") or "unknown",
+            "resource_monitoring": job.get("resource_monitoring") or ("completed" if summary else "unknown"),
+            "resource_monitor_error": job.get("resource_monitor_error"),
+            "sample_count": int(summary.get("sample_count") or len(samples)),
+            "interval_seconds": request.get("resource_monitor_interval") or job.get("resource_monitor_interval") or 5.0,
+            "root_pid": root_pid,
+            "process_visible": process_visible,
+            "resource_log": str(log_path) if log_path.name.endswith(MONITOR_LOG_SUFFIX) else None,
+            "summary_file": str(summary_path) if summary_path.is_file() else None,
+            "manifest_file": job.get("manifest_file"),
+            "request": request,
+            "latest": latest,
+            "peak": {
+                "ram_rss_bytes": summary.get("peak_ram_rss_bytes") or monitor_value_peak(samples, "ram_rss_bytes"),
+                "ram_uss_bytes": summary.get("peak_ram_uss_bytes") or monitor_value_peak(samples, "ram_uss_bytes"),
+                "gpu_memory_bytes": summary.get("peak_gpu_memory_bytes") or monitor_value_peak(samples, "gpu_memory_bytes"),
+                "cpu_utilization_percent": summary.get("peak_cpu_utilization_percent") or (max(peak_cpu_values) if peak_cpu_values else None),
+            },
+        }
+        if include_samples:
+            record["samples"] = samples
+        return record
+
+    def validation_sources(self) -> dict[str, tuple[Path, dict[str, object]]]:
+        """Collect active jobs and persisted web-validation manifests."""
+        sources: dict[str, tuple[Path, dict[str, object]]] = {}
+        with self.eval_lock:
+            jobs = {job_id: dict(job) for job_id, job in self.eval_jobs.items()}
+        for job_id, job in jobs.items():
+            log_path = job.get("resource_log") or job.get("log_file")
+            if isinstance(log_path, str):
+                sources[job_id] = (Path(log_path), job)
+
+        if self.results_root.exists():
+            for manifest_path in self.results_root.rglob("validation_job_*.json"):
+                payload = read_json(manifest_path)
+                job_id = payload.get("id")
+                log_path = payload.get("resource_log") or payload.get("log_file")
+                if isinstance(job_id, str) and isinstance(log_path, str) and job_id not in sources:
+                    payload["manifest_file"] = str(manifest_path)
+                    sources[job_id] = (Path(log_path), payload)
+        return sources
 
 def read_jsonl_tail(path: Path, limit: int) -> list[dict[str, object]]:
     """Read only the newest monitor samples so polling stays cheap for long runs."""
@@ -54,6 +362,11 @@ def read_json(path: Path) -> dict[str, object]:
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def is_validation_resource_log(path: Path) -> bool:
+    """Keep web-triggered validation telemetry out of the training monitor."""
+    return any(path.parent.glob("validation_job_*.json"))
 
 
 def monitor_manifest(log_path: Path, results_root: Path) -> Path | None:
@@ -294,6 +607,99 @@ def create_app(results_root: Path = DEFAULT_RESULTS_ROOT) -> FastAPI:
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/api/eval/options")
+    def evaluation_options() -> dict[str, object]:
+        return state.evaluation_options()
+
+    @app.get("/api/eval/jobs")
+    def evaluation_jobs() -> dict[str, object]:
+        with state.eval_lock:
+            job_ids = sorted(
+                state.eval_jobs,
+                key=lambda job_id: state.eval_jobs[job_id].get("created_at", ""),
+                reverse=True,
+            )[:20]
+        return {
+            "jobs": [state.public_eval_job(job_id) for job_id in job_ids],
+            "active_job_id": state.active_eval_job,
+        }
+
+    @app.get("/api/eval/jobs/{job_id}")
+    def evaluation_job(job_id: str) -> dict[str, object]:
+        with state.eval_lock:
+            if job_id not in state.eval_jobs:
+                raise HTTPException(status_code=404, detail="Unknown evaluation job.")
+        return state.public_eval_job(job_id)
+
+    @app.post("/api/eval/jobs", status_code=202)
+    def start_evaluation(request: EvaluationRequest) -> dict[str, object]:
+        resolved_checkpoints = []
+        for checkpoint_string in request.checkpoints:
+            checkpoint = state._resolve_project_path(Path(checkpoint_string))
+            if not checkpoint.is_file() or checkpoint.suffix != ".pth":
+                raise HTTPException(status_code=400, detail=f"Invalid checkpoint: {checkpoint}")
+            resolved_checkpoints.append(str(checkpoint))
+
+        test_list = state._resolve_project_path(Path(request.test_list))
+        if not test_list.is_file():
+            raise HTTPException(status_code=400, detail=f"Test list does not exist: {test_list}")
+
+        output_dir = state._resolve_project_path(Path(request.output_dir))
+        job_id = uuid.uuid4().hex[:12]
+        with state.eval_lock:
+            if state.active_eval_job is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Evaluation job {state.active_eval_job} is already running.",
+                )
+            state.active_eval_job = job_id
+            state.eval_jobs[job_id] = {
+                "id": job_id,
+                "status": "queued",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "pid": None,
+                "request": {
+                    "checkpoints": resolved_checkpoints,
+                    "output_dir": str(output_dir),
+                    "test_list": str(test_list),
+                    "dataset_name": request.dataset_name,
+                    "class_type": request.class_type,
+                    "batch_size": request.batch_size,
+                    "num_workers": request.num_workers,
+                    "resource_monitor_interval": request.resource_monitor_interval,
+                },
+            }
+
+        normalized_request = request.model_copy(update={
+            "checkpoints": resolved_checkpoints,
+            "output_dir": str(output_dir),
+            "test_list": str(test_list),
+        })
+        threading.Thread(
+            target=state._run_evaluation,
+            args=(job_id, normalized_request),
+            name=f"hff-eval-{job_id}",
+            daemon=True,
+        ).start()
+        return state.public_eval_job(job_id)
+
+    @app.get("/api/validation/runs")
+    def validation_runs() -> dict[str, object]:
+        records = [
+            state._validation_record(job_id, log_path, job)
+            for job_id, (log_path, job) in state.validation_sources().items()
+        ]
+        records.sort(key=lambda record: record.get("created_at") or "", reverse=True)
+        return {"runs": records, "updated_at": datetime.now(timezone.utc).isoformat()}
+
+    @app.get("/api/validation/runs/{run_id}")
+    def validation_run(run_id: str) -> dict[str, object]:
+        source = state.validation_sources().get(run_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="Unknown validation run.")
+        log_path, job = source
+        return state._validation_record(run_id, log_path, job, include_samples=True)
+
     @app.get("/api/monitor/runs")
     def monitor_runs() -> dict[str, object]:
         if not state.results_root.exists():
@@ -301,7 +707,7 @@ def create_app(results_root: Path = DEFAULT_RESULTS_ROOT) -> FastAPI:
         records = [
             monitor_record(path, state.results_root)
             for path in state.results_root.rglob(f"*{MONITOR_LOG_SUFFIX}")
-            if path.is_file()
+            if path.is_file() and not is_validation_resource_log(path)
         ]
         records.sort(key=lambda record: (record["status"] != "running", record["updated_at"]),)
         return {"runs": records, "updated_at": datetime.now(timezone.utc).isoformat()}

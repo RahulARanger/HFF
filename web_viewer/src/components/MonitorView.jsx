@@ -21,6 +21,11 @@ function formatBytes(value) {
   return `${scaled.toFixed(scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2)} ${unit}`;
 }
 
+function peakMetricValue(samples, field) {
+  const values = samples.map((sample) => Number(sample[field])).filter(Number.isFinite);
+  return values.length ? Math.max(...values) : null;
+}
+
 function formatTime(value) {
   if (!value) return "No samples yet";
   const date = new Date(value);
@@ -172,6 +177,12 @@ function ResourceDrilldown({ samples }) {
   );
 }
 
+function formatLossTick(value) {
+  if (Math.abs(value) >= 10) return value.toFixed(0);
+  if (Math.abs(value) >= 1) return value.toFixed(2);
+  return value.toFixed(3);
+}
+
 function EpochLineChart({ history }) {
   const rows = history.filter((row) => Number.isFinite(Number(row.epoch)));
   const [hoveredIndex, setHoveredIndex] = useState(null);
@@ -191,11 +202,18 @@ function EpochLineChart({ history }) {
   const maximum = rawMaximum + padding;
   const minimum = Math.max(0, rawMinimum - padding);
   const range = Math.max(maximum - minimum, Number.EPSILON);
+  const chartTicks = Array.from({ length: 4 }, (_, index) => {
+    const ratio = index / 3;
+    return {
+      value: maximum - range * ratio,
+      y: 12 + ratio * 76,
+    };
+  });
   const pointFor = (field, row, index) => {
     const value = Number(row[field]);
     if (!Number.isFinite(value)) return null;
     const x = rows.length === 1 ? 50 : (index / (rows.length - 1)) * 100;
-    return { x, y: 92 - ((value - minimum) / range) * 78 };
+    return { x, y: 88 - ((value - minimum) / range) * 76 };
   };
   const pointsFor = (field) => rows
     .map((row, index) => pointFor(field, row, index))
@@ -209,23 +227,16 @@ function EpochLineChart({ history }) {
     <div className="epoch-chart-shell">
       <div className="epoch-chart-legend">{series.map((item) => <span key={item.field}><i style={{ background: item.color }} />{item.label}</span>)}</div>
       <div className="epoch-chart-plot">
-      <svg className="epoch-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Training and validation loss by epoch" onMouseMove={(event) => setHoveredIndex(nearestPoint(event, rows.length))} onMouseLeave={() => setHoveredIndex(null)}>
-        {[20, 56, 92].map((y) => <line key={y} x1="0" y1={y} x2="100" y2={y} stroke="rgba(128, 155, 173, 0.18)" strokeWidth="1" />)}
-        {hoveredX !== null && <line x1={hoveredX} y1="8" x2={hoveredX} y2="92" stroke="#50e3c2" strokeOpacity="0.65" strokeDasharray="2 2" vectorEffect="non-scaling-stroke" />}
-        {series.map((item) => (
-          <g key={item.field}>
-            <polyline points={pointsFor(item.field)} fill="none" stroke={item.color} strokeWidth="2" vectorEffect="non-scaling-stroke" />
-            {rows.map((row, index) => {
-              const point = pointFor(item.field, row, index);
-              return point ? <circle key={`${item.field}-${index}`} cx={point.x} cy={point.y} r="2.2" fill={item.color} vectorEffect="non-scaling-stroke" /> : null;
-            })}
-          </g>
-        ))}
-      </svg>
-      {hoveredRow && <div className="graph-tooltip epoch-tooltip" style={{ left: `${hoveredX}%` }}>
+        <div className="epoch-chart-y-axis" aria-hidden="true">{chartTicks.map((tick) => <span key={tick.y}>{formatLossTick(tick.value)}</span>)}</div>
+        <svg className="epoch-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Training and validation loss by epoch" onMouseMove={(event) => setHoveredIndex(nearestPoint(event, rows.length))} onMouseLeave={() => setHoveredIndex(null)}>
+          {chartTicks.map((tick) => <line key={tick.y} x1="0" y1={tick.y} x2="100" y2={tick.y} stroke={tick.y === 88 ? "rgba(128, 155, 173, 0.32)" : "rgba(128, 155, 173, 0.16)"} strokeWidth="1" vectorEffect="non-scaling-stroke" />)}
+          {hoveredX !== null && <line x1={hoveredX} y1="8" x2={hoveredX} y2="92" stroke="#50e3c2" strokeOpacity="0.72" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />}
+          {series.map((item) => <polyline key={item.field} points={pointsFor(item.field)} fill="none" stroke={item.color} strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />)}
+        </svg>
+        {hoveredRow && <div className="graph-tooltip epoch-tooltip" style={{ left: `calc(42px + (100% - 42px) * ${hoveredX / 100})` }}>
         <strong>Epoch {hoveredRow.epoch}</strong>
         {series.map((item) => Number.isFinite(Number(hoveredRow[item.field])) && <span key={item.field}><i style={{ background: item.color }} />{item.label}: {Number(hoveredRow[item.field]).toFixed(4)}</span>)}
-      </div>}
+        </div>}
       </div>
       <div className="epoch-chart-axis" aria-hidden="true">{rows.map((row) => <span key={row.epoch}>Epoch {row.epoch}</span>)}</div>
     </div>
@@ -242,6 +253,7 @@ const DIAGNOSTIC_SERIES = [
 
 function EpochDiagnosticLane({ item, rows }) {
   const values = rows.map((row) => Number(row[item.field])).filter(Number.isFinite);
+  const [hoveredIndex, setHoveredIndex] = useState(null);
   if (!values.length) return null;
   const maximum = Math.max(...values, 1);
   const latest = [...rows].reverse().map((row) => Number(row[item.field])).find(Number.isFinite);
@@ -258,16 +270,24 @@ function EpochDiagnosticLane({ item, rows }) {
     .join(" ");
   const lastIndex = rows.map((row) => Number(row[item.field])).reduce((last, value, index) => Number.isFinite(value) ? index : last, -1);
   const lastPoint = lastIndex >= 0 ? pointFor(rows[lastIndex], lastIndex) : null;
+  const hoveredRow = hoveredIndex === null ? null : rows[hoveredIndex];
+  const hoveredPoint = hoveredRow ? pointFor(hoveredRow, hoveredIndex) : null;
+  const hoveredX = hoveredPoint?.x ?? null;
   return (
     <article className="epoch-diagnostic-lane">
       <div className="epoch-diagnostic-header"><span><i style={{ background: item.color }} />{item.label}</span><strong>{item.formatValue(latest)}</strong></div>
       <div className="epoch-diagnostic-plot">
         <span>{item.formatValue(maximum)}</span>
-        <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${item.label} by epoch`}>
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${item.label} by epoch`} onMouseMove={(event) => setHoveredIndex(nearestPoint(event, rows.length))} onMouseLeave={() => setHoveredIndex(null)}>
           {[18, 54, 90].map((y) => <line key={y} x1="0" y1={y} x2="100" y2={y} stroke="rgba(128, 155, 173, 0.18)" strokeWidth="1" />)}
+          {hoveredX !== null && <line x1={hoveredX} y1="10" x2={hoveredX} y2="90" stroke="#50e3c2" strokeOpacity="0.72" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />}
           <polyline points={points} fill="none" stroke={item.color} strokeWidth="2.4" vectorEffect="non-scaling-stroke" />
           {lastPoint && <circle cx={lastPoint.x} cy={lastPoint.y} r="2.6" fill={item.color} vectorEffect="non-scaling-stroke" />}
         </svg>
+        {hoveredRow && hoveredX !== null && <div className="graph-tooltip epoch-diagnostic-tooltip" style={{ left: `calc(${hoveredX}% + ${35 * (1 - hoveredX / 100)}px)` }}>
+          <strong>Epoch {hoveredRow.epoch}</strong>
+          <span>{item.formatValue(Number(hoveredRow[item.field]))}</span>
+        </div>}
         <span>0</span>
       </div>
     </article>
@@ -349,12 +369,15 @@ function EpochDrilldown({ training }) {
   );
 }
 
-function MetricCard({ label, value, children, tone = "blue" }) {
+function MetricCard({ label, value, peak, children, tone = "blue" }) {
   return (
     <Card className={`monitor-metric-card ${tone}`}>
       <div className="monitor-metric-card-header">
         <div className="monitor-metric-label">{label}</div>
-        <div className="monitor-metric-value">{value}</div>
+        <div className="monitor-metric-values">
+          <div className="monitor-metric-value">{value}</div>
+          <div className="monitor-metric-peak">peak {peak}</div>
+        </div>
       </div>
       {children}
     </Card>
@@ -579,13 +602,28 @@ export default function MonitorView() {
               </header>
 
               <div className="monitor-metrics-grid">
-                <MetricCard label="RAM RSS" value={formatBytes(latest.ram_rss_bytes)} tone="blue">
+                <MetricCard
+                  label="RAM RSS"
+                  value={formatBytes(latest.ram_rss_bytes)}
+                  peak={formatBytes(detail.peak?.ram_rss_bytes ?? peakMetricValue(samples, "ram_rss_bytes"))}
+                  tone="blue"
+                >
                   <Sparkline samples={samples} field="ram_rss_bytes" color="#43b7e8" />
                 </MetricCard>
-                <MetricCard label="RAM USS" value={formatBytes(latest.ram_uss_bytes)} tone="violet">
+                <MetricCard
+                  label="RAM USS"
+                  value={formatBytes(latest.ram_uss_bytes)}
+                  peak={formatBytes(detail.peak?.ram_uss_bytes ?? peakMetricValue(samples, "ram_uss_bytes"))}
+                  tone="violet"
+                >
                   <Sparkline samples={samples} field="ram_uss_bytes" color="#9b8cff" />
                 </MetricCard>
-                <MetricCard label="VRAM" value={formatBytes(latest.gpu_memory_bytes)} tone="orange">
+                <MetricCard
+                  label="VRAM"
+                  value={formatBytes(latest.gpu_memory_bytes)}
+                  peak={formatBytes(detail.peak?.gpu_memory_bytes ?? peakMetricValue(samples, "gpu_memory_bytes"))}
+                  tone="orange"
+                >
                   <Sparkline samples={samples} field="gpu_memory_bytes" color="#f0a35b" />
                 </MetricCard>
               </div>

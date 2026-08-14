@@ -3,19 +3,37 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+import getpass
+import os
+import posixpath
 from pathlib import Path
+import re
+import shlex
+import stat
+import tempfile
+from typing import Callable
 
 import napari
 import numpy as np
 import SimpleITK as sitk
 import torch
-from qtpy.QtCore import Qt
+from qtpy.QtCore import QObject, QSettings, QThread, Qt, Signal
 from qtpy.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
     QComboBox,
     QCompleter,
     QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QListWidget,
+    QMessageBox,
+    QInputDialog,
     QPushButton,
+    QProgressDialog,
     QVBoxLayout,
     QWidget,
 )
@@ -37,19 +55,895 @@ MODEL_HIGH_MODALITIES = tuple(
 )
 
 
+VIEWER_SETTINGS = QSettings("HFF-Net", "NapariViewer")
+
+
+def remembered_local_directory(fallback: Path) -> str:
+    value = str(VIEWER_SETTINGS.value("lastLocalDirectory", "") or "")
+    remembered = Path(value).expanduser()
+    return str(remembered if remembered.is_dir() else fallback)
+
+
+def remember_local_directory(selected_directory: Path) -> None:
+    VIEWER_SETTINGS.setValue("lastLocalDirectory", str(selected_directory.parent))
+    VIEWER_SETTINGS.sync()
+
+
+def remembered_remote_directory(profile_name: str) -> str | None:
+    if not profile_name:
+        return None
+    value = VIEWER_SETTINGS.value(f"lastRemoteDirectory/{profile_name}")
+    return str(value) if value else None
+
+
+def remember_remote_directory(profile_name: str, selected_directory: str) -> None:
+    if not profile_name:
+        return
+    normalized = selected_directory.rstrip("/") or "/"
+    parent = posixpath.dirname(normalized) or "/"
+    VIEWER_SETTINGS.setValue(f"lastRemoteDirectory/{profile_name}", parent)
+    VIEWER_SETTINGS.sync()
+
+
 def strip_nifti_suffix(path: Path) -> str:
-    if path.name.endswith(".nii.gz"):
+    if path.name.lower().endswith(".nii.gz"):
         return path.name[:-7]
     return path.stem
 
 
+def is_nifti_name(name: str) -> bool:
+    """Return whether a remote filename is a NIfTI volume."""
+    lowered = name.lower()
+    return lowered.endswith(".nii") or lowered.endswith(".nii.gz")
+
+
 def is_nifti_file(path: Path) -> bool:
-    return path.name.endswith(".nii") or path.name.endswith(".nii.gz")
+    return is_nifti_name(path.name)
 
 
 def is_frequency_file(path: Path) -> bool:
     stem = strip_nifti_suffix(path).lower()
     return stem.rsplit("_", 1)[-1] in {"l", "h", "h1", "h2", "h3", "h4"}
+
+
+@dataclass(frozen=True)
+class SSHProfile:
+    """One named host entry from the OpenSSH config used by VS Code."""
+
+    name: str
+    settings: dict[str, object]
+
+
+def vscode_settings_paths() -> tuple[Path, ...]:
+    """Return likely VS Code user-settings locations for the current platform."""
+    home = Path.home()
+    candidates = [
+        PROJECT_ROOT / ".vscode/settings.json",
+        home / "Library/Application Support/Code/User/settings.json",
+        home / ".config/Code/User/settings.json",
+    ]
+    app_data = os.environ.get("APPDATA")
+    if app_data:
+        candidates.append(Path(app_data) / "Code/User/settings.json")
+    return tuple(dict.fromkeys(candidates))
+
+
+def vscode_ssh_config_path() -> Path:
+    """Resolve VS Code Remote-SSH's config path, falling back to OpenSSH's default."""
+    setting_pattern = re.compile(
+        r'["\']remote\.SSH\.configFile["\']\s*:\s*["\']([^"\']+)["\']'
+    )
+    for settings_path in vscode_settings_paths():
+        try:
+            settings_text = settings_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        match = setting_pattern.search(settings_text)
+        if match:
+            return Path(os.path.expandvars(match.group(1))).expanduser().resolve()
+    return Path.home() / ".ssh/config"
+
+
+def load_ssh_profiles(config_path: Path) -> list[SSHProfile]:
+    """Read named, non-wildcard hosts from an OpenSSH config file."""
+    try:
+        import paramiko
+    except ImportError as error:
+        raise RuntimeError(
+            "SSH support requires Paramiko. Install the project requirements "
+            "or run `pip install paramiko`."
+        ) from error
+
+    if not config_path.is_file():
+        raise FileNotFoundError(f"SSH config file not found: {config_path}")
+
+    ssh_config = paramiko.SSHConfig.from_path(str(config_path))
+    profiles: list[SSHProfile] = []
+    seen: set[str] = set()
+    for name in ssh_config.get_hostnames():
+        if name in seen or any(character in name for character in "*!?"):
+            continue
+        seen.add(name)
+        profiles.append(SSHProfile(name, dict(ssh_config.lookup(name))))
+    return profiles
+
+
+class SSHSession:
+    """Small SSH-backed bridge for loading one remote subject locally.
+
+    Napari and the existing model helpers intentionally operate on local
+    ``Path`` objects.  The session therefore downloads only the selected
+    subject's NIfTI files into a temporary directory; no remote data is
+    written or mounted.
+    """
+
+    def __init__(self, client: object, sftp: object | None, profile_name: str = "") -> None:
+        self.client = client
+        self.sftp = sftp
+        self.profile_name = profile_name
+        self.cache_directory = Path(tempfile.mkdtemp(prefix="hff_napari_ssh_"))
+        self._closed = False
+
+    @classmethod
+    def connect(
+        cls,
+        *,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        identity_files: list[str],
+        key_passphrase: str,
+        proxy_command: str,
+        profile_name: str = "",
+    ) -> "SSHSession":
+        try:
+            import paramiko
+        except ImportError as error:
+            raise RuntimeError(
+                "SSH support requires Paramiko. Install the project requirements "
+                "or run `pip install paramiko`."
+            ) from error
+
+        if not host.strip():
+            raise ValueError("SSH host is required.")
+
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        # The session is interactive and does not persist credentials.  Keep
+        # the usual SSH first-use behaviour for hosts not yet in known_hosts.
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        connect_kwargs: dict[str, object] = {
+            "hostname": host.strip(),
+            "port": port,
+            "timeout": 15,
+            "banner_timeout": 15,
+            "auth_timeout": 15,
+            "allow_agent": True,
+            "look_for_keys": True,
+        }
+        if username.strip():
+            connect_kwargs["username"] = username.strip()
+        if password:
+            connect_kwargs["password"] = password
+        expanded_identity_files = [
+            os.path.expandvars(identity_file).strip()
+            for identity_file in identity_files
+            if identity_file.strip() and identity_file.lower() != "none"
+        ]
+        if expanded_identity_files:
+            connect_kwargs["key_filename"] = [
+                str(Path(identity_file).expanduser())
+                for identity_file in expanded_identity_files
+            ]
+        if key_passphrase:
+            connect_kwargs["passphrase"] = key_passphrase
+
+        proxy = None
+        if proxy_command.strip() and proxy_command.strip().lower() != "none":
+            proxy_command = proxy_command.strip()
+            proxy_command = proxy_command.replace("%%", "%")
+            proxy_command = proxy_command.replace("%h", host.strip())
+            proxy_command = proxy_command.replace("%p", str(port))
+            proxy_command = proxy_command.replace("%r", username.strip())
+            proxy = paramiko.ProxyCommand(proxy_command)
+            connect_kwargs["sock"] = proxy
+
+        try:
+            try:
+                client.connect(**connect_kwargs)
+            except paramiko.SSHException as authentication_error:
+                # Paramiko's regular SSHClient.connect path does not attempt
+                # keyboard-interactive authentication when no key or
+                # password was supplied. OpenSSH/VS Code commonly uses this
+                # method, especially with a ProxyCommand, so retry it with
+                # the selected profile's optional password.
+                can_retry_interactive = isinstance(
+                    authentication_error, paramiko.AuthenticationException
+                ) or "No authentication methods available" in str(authentication_error)
+                if not can_retry_interactive:
+                    raise
+                transport = client.get_transport()
+                if transport is None:
+                    raise
+                auth_username = username.strip() or getpass.getuser()
+
+                if proxy_command.strip() and not password:
+                    # NetBird SSH profiles can authenticate the connection at
+                    # the proxy and intentionally use OpenSSH's ``none``
+                    # method. Do not turn that valid passwordless flow into a
+                    # password prompt.
+                    try:
+                        transport.auth_none(auth_username)
+                    except Exception:
+                        raise authentication_error
+                else:
+                    def interactive_handler(_title: str, _instructions: str, prompts: list[tuple[str, bool]]) -> tuple[str, ...]:
+                        return tuple(password for _prompt, _echo in prompts)
+
+                    try:
+                        transport.auth_interactive(auth_username, interactive_handler)
+                    except Exception:
+                        raise authentication_error
+            try:
+                sftp = client.open_sftp()
+            except Exception:
+                # Some NetBird SSH endpoints support shell commands but close
+                # SFTP subsystem requests. Keep the authenticated transport
+                # and use the exec-based filesystem fallback below.
+                sftp = None
+        except Exception:
+            if proxy is not None:
+                proxy.close()
+            client.close()
+            raise
+        return cls(client, sftp, profile_name)
+
+    def execute(self, command: str) -> bytes:
+        """Run a read-only remote command and return stdout bytes."""
+        _stdin, stdout, stderr = self.client.exec_command(command)
+        output = stdout.read()
+        error = stderr.read()
+        exit_status = stdout.channel.recv_exit_status()
+        if exit_status != 0:
+            message = error.decode("utf-8", errors="replace").strip()
+            raise OSError(message or f"Remote command failed with status {exit_status}.")
+        return output
+
+    def normalize(self, remote_path: str) -> str:
+        if self.sftp is not None:
+            return str(self.sftp.normalize(remote_path or "."))
+        quoted_path = shlex.quote(remote_path or ".")
+        return self.execute(f"cd {quoted_path} && pwd -P").decode("utf-8").strip()
+
+    def directory_entries(self, remote_path: str) -> list[tuple[str, bool]]:
+        """Return ``(name, is_directory)`` entries for a remote directory."""
+        normalized = self.normalize(remote_path)
+        if self.sftp is None:
+            output = self.execute(
+                "find {path} -mindepth 1 -maxdepth 1 "
+                "-printf '%y\\t%f\\n'".format(path=shlex.quote(normalized))
+            )
+            entries = []
+            for line in output.decode("utf-8", errors="replace").splitlines():
+                kind, separator, name = line.partition("\t")
+                if separator and name:
+                    entries.append((name, kind == "d"))
+            return sorted(entries, key=lambda item: (not item[1], item[0].lower()))
+
+        entries = []
+        for entry in self.sftp.listdir_attr(normalized):
+            mode = getattr(entry, "st_mode", 0)
+            entries.append((str(entry.filename), stat.S_ISDIR(mode)))
+        return sorted(entries, key=lambda item: (not item[1], item[0].lower()))
+
+    def is_subject_directory(self, remote_path: str) -> bool:
+        try:
+            entries = self.directory_entries(remote_path)
+        except OSError:
+            return False
+        files = [name for name, is_directory in entries if not is_directory]
+        return any(is_nifti_name(name) and "_seg" in name.lower() for name in files)
+
+    def download_subject(
+        self,
+        remote_path: str,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> Path:
+        """Download the selected record's NIfTI files and return its local path."""
+        normalized = self.normalize(remote_path)
+        entries = self.directory_entries(normalized)
+        nifti_files = [name for name, is_directory in entries if not is_directory and is_nifti_name(name)]
+        if not any("_seg" in name.lower() for name in nifti_files):
+            raise ValueError("That remote folder is not a BraTS record: no _seg.nii file was found.")
+        if not nifti_files:
+            raise ValueError("That remote folder does not contain NIfTI files.")
+
+        subject_name = Path(normalized).name or "remote_subject"
+        local_directory = Path(tempfile.mkdtemp(prefix=f"{subject_name}_", dir=self.cache_directory))
+        total_files = len(nifti_files)
+        for index, filename in enumerate(nifti_files, start=1):
+            remote_file = posixpath.join(normalized, filename)
+            if self.sftp is not None:
+                self.sftp.get(remote_file, str(local_directory / filename))
+            else:
+                file_bytes = self.execute(f"cat -- {shlex.quote(remote_file)}")
+                (local_directory / filename).write_bytes(file_bytes)
+            if progress_callback is not None:
+                progress_callback(index, total_files, filename)
+        return local_directory
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self.sftp is not None:
+            self.sftp.close()
+        self.client.close()
+        # Temporary cache cleanup is deliberately best-effort; a viewer crash
+        # must not prevent the application from exiting.
+        try:
+            import shutil
+
+            shutil.rmtree(self.cache_directory, ignore_errors=True)
+        except OSError:
+            pass
+
+
+class RemoteSubjectDownloadWorker(QObject):
+    """Download a remote subject without blocking Napari's Qt event loop."""
+
+    finished = Signal(object, object, object)
+    failed = Signal(str)
+    progress = Signal(int)
+    message = Signal(str)
+
+    def __init__(self, session: SSHSession, remote_path: str) -> None:
+        super().__init__()
+        self.session = session
+        self.remote_path = remote_path
+
+    def run(self) -> None:
+        try:
+            local_path = self.session.download_subject(
+                self.remote_path,
+                progress_callback=self.report_progress,
+            )
+            self.message.emit("Loading downloaded MRI volumes…")
+            volumes, mask = load_subject(local_path)
+        except Exception as error:
+            self.failed.emit(str(error))
+            return
+        self.finished.emit(local_path, volumes, mask)
+
+    def report_progress(self, index: int, total: int, filename: str) -> None:
+        percentage = int(index * 100 / max(total, 1))
+        self.progress.emit(percentage)
+        self.message.emit(f"Downloading {index}/{total}: {filename}")
+
+
+def start_remote_subject_download(
+    session: SSHSession,
+    remote_path: str,
+    parent: QWidget,
+    on_finished: Callable[[Path, dict[str, np.ndarray], np.ndarray | None], None],
+    on_failed: Callable[[str], None],
+) -> None:
+    """Start a visible background download and return immediately."""
+    progress = QProgressDialog("Preparing remote folder…", None, 0, 100, parent)
+    progress.setWindowTitle("Loading remote BraTS folder")
+    progress.setMinimumDuration(0)
+    progress.setAutoClose(False)
+    progress.setAutoReset(False)
+    progress.setCancelButton(None)
+    progress.setWindowModality(Qt.WindowModality.WindowModal)
+    progress.show()
+
+    thread = QThread(parent)
+    worker = RemoteSubjectDownloadWorker(session, remote_path)
+    worker.moveToThread(thread)
+    # Keep strong references until the worker has emitted its completion
+    # signal; otherwise Python can collect the wrapper while the Qt thread is
+    # still running.
+    parent._remote_download_thread = thread  # type: ignore[attr-defined]
+    parent._remote_download_worker = worker  # type: ignore[attr-defined]
+    parent._remote_download_progress = progress  # type: ignore[attr-defined]
+
+    worker.progress.connect(progress.setValue)
+    worker.message.connect(progress.setLabelText)
+    thread.started.connect(worker.run)
+
+    result: dict[str, object] = {}
+
+    def record_finished(
+        local_path: Path,
+        volumes: dict[str, np.ndarray],
+        mask: np.ndarray | None,
+    ) -> None:
+        result["finished"] = (local_path, volumes, mask)
+
+    def record_failed(message: str) -> None:
+        result["failed"] = message
+
+    worker.finished.connect(record_finished)
+    worker.failed.connect(record_failed)
+    worker.finished.connect(thread.quit)
+    worker.failed.connect(thread.quit)
+    worker.finished.connect(worker.deleteLater)
+    worker.failed.connect(worker.deleteLater)
+
+    def finish_after_thread_stops() -> None:
+        progress.close()
+        for attribute, value in (
+            ("_remote_download_thread", thread),
+            ("_remote_download_worker", worker),
+            ("_remote_download_progress", progress),
+        ):
+            if getattr(parent, attribute, None) is value:
+                setattr(parent, attribute, None)
+        if "finished" in result:
+            on_finished(*result["finished"])  # type: ignore[arg-type]
+        elif "failed" in result:
+            on_failed(str(result["failed"]))
+
+    thread.finished.connect(finish_after_thread_stops)
+    thread.finished.connect(thread.deleteLater)
+    thread.start()
+
+
+class SSHConnectionDialog(QDialog):
+    """Select a named host from the OpenSSH config used by VS Code."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Connect to BraTS folder over SSH")
+        self.setMinimumWidth(430)
+        self.config_path = vscode_ssh_config_path()
+        self.profiles = load_ssh_profiles(self.config_path)
+        self.profile_index = {profile.name: profile for profile in self.profiles}
+
+        form = QFormLayout(self)
+        config_label = QLabel(str(self.config_path))
+        config_label.setWordWrap(True)
+        config_label.setStyleSheet("color: palette(mid); font-size: 11px;")
+        form.addRow("VS Code SSH config", config_label)
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItems(self.profile_index)
+        self.profile_combo.currentTextChanged.connect(self.update_profile_details)
+        form.addRow("SSH profile", self.profile_combo)
+
+        self.profile_details = QLabel()
+        self.profile_details.setWordWrap(True)
+        self.profile_details.setStyleSheet("color: palette(mid); font-size: 11px;")
+        form.addRow("Resolved settings", self.profile_details)
+
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_edit.setPlaceholderText("optional; not stored in SSH config")
+        form.addRow("Password", self.password_edit)
+
+        self.key_passphrase_edit = QLineEdit()
+        self.key_passphrase_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key_passphrase_edit.setPlaceholderText("optional")
+        form.addRow("Key passphrase", self.key_passphrase_edit)
+
+        form.addRow(
+            QLabel(
+                "Credentials are used for this viewer session only. The selected "
+                "subject is cached locally while Napari is open. Host, user, port, "
+                "identity files, and proxy settings come from the selected profile."
+            )
+        )
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+        self.connect_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if self.connect_button is not None:
+            self.connect_button.setEnabled(bool(self.profiles))
+        self.update_profile_details(self.profile_combo.currentText())
+        if not self.profiles:
+            self.profile_details.setText(
+                "No named SSH profiles were found. Add a Host entry to the config "
+                "and reopen this dialog."
+            )
+
+    def update_profile_details(self, profile_name: str) -> None:
+        profile = self.profile_index.get(profile_name)
+        if profile is None:
+            return
+        settings = profile.settings
+        host = str(settings.get("hostname") or profile.name)
+        username = str(settings.get("user") or "(local SSH username)")
+        port = str(settings.get("port") or 22)
+        identity_files = settings.get("identityfile", [])
+        if isinstance(identity_files, str):
+            identity_files = [identity_files]
+        identity_summary = ", ".join(str(path) for path in identity_files) or "SSH agent / default keys"
+        proxy = str(settings.get("proxycommand") or settings.get("proxyjump") or "none")
+        self.profile_details.setText(
+            f"Host: {host}\nUser: {username}\nPort: {port}\n"
+            f"Identity: {identity_summary}\nProxy: {proxy}"
+        )
+
+    def settings(self) -> dict[str, object]:
+        profile = self.profile_index[self.profile_combo.currentText()]
+        profile_settings = profile.settings
+        identity_files = profile_settings.get("identityfile", [])
+        if isinstance(identity_files, str):
+            identity_files = [identity_files]
+        return {
+            "host": str(profile_settings.get("hostname") or profile.name),
+            "port": int(profile_settings.get("port") or 22),
+            "username": str(profile_settings.get("user") or ""),
+            "password": self.password_edit.text(),
+            "identity_files": [str(path) for path in identity_files],
+            "key_passphrase": self.key_passphrase_edit.text(),
+            "proxy_command": str(profile_settings.get("proxycommand") or ""),
+            "profile_name": profile.name,
+        }
+
+
+def open_ssh_session(parent: QWidget | None = None) -> SSHSession | None:
+    try:
+        dialog = SSHConnectionDialog(parent)
+    except Exception as error:
+        QMessageBox.critical(parent, "SSH profile loading failed", str(error))
+        return None
+    while dialog.exec() == QDialog.DialogCode.Accepted:
+        settings = dialog.settings()
+        try:
+            return SSHSession.connect(**settings)
+        except Exception as error:
+            authentication_error = "No authentication methods available" in str(error)
+            has_proxy = bool(str(settings.get("proxy_command") or "").strip())
+            if authentication_error and not has_proxy and not dialog.password_edit.text():
+                password, accepted = QInputDialog.getText(
+                    parent,
+                    "SSH authentication required",
+                    "This profile has no available SSH key or agent identity.\n"
+                    "Enter the SSH password, or cancel to return to the profile selector:",
+                    QLineEdit.EchoMode.Password,
+                )
+                if accepted and password:
+                    dialog.password_edit.setText(password)
+                    continue
+            QMessageBox.critical(parent, "SSH connection failed", str(error))
+    return None
+
+
+class RemoteDirectoryWorker(QObject):
+    """Run one remote directory operation outside the Qt UI thread."""
+
+    directory_loaded = Signal(str, object)
+    validation_finished = Signal(str, bool)
+    failed = Signal(str)
+
+    def __init__(self, session: SSHSession, requested_path: str, validate: bool) -> None:
+        super().__init__()
+        self.session = session
+        self.requested_path = requested_path
+        self.validate = validate
+
+    def run(self) -> None:
+        try:
+            normalized = self.session.normalize(self.requested_path)
+            entries = self.session.directory_entries(normalized)
+            if self.validate:
+                valid = any(
+                    not is_directory
+                    and is_nifti_name(name)
+                    and "_seg" in name.lower()
+                    for name, is_directory in entries
+                )
+                self.validation_finished.emit(normalized, valid)
+            else:
+                self.directory_loaded.emit(normalized, entries)
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
+class RemoteDirectoryDialog(QDialog):
+    """Browse remote directories without blocking the Napari UI."""
+
+    def __init__(
+        self,
+        session: SSHSession,
+        parent: QWidget | None = None,
+        initial_path: str | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.session = session
+        self.selected_remote_path: str | None = None
+        self.fallback_path = "."
+        self.pending_validation: tuple[str, bool] | None = None
+        self.operation_error: str | None = None
+        self.operation_requested_path = "."
+        self.operation_allow_fallback = True
+        self.operation_thread: QThread | None = None
+        self.operation_worker: RemoteDirectoryWorker | None = None
+        self.setWindowTitle("Select remote BraTS record folder")
+        self.setMinimumSize(560, 430)
+
+        layout = QVBoxLayout(self)
+        path_row = QHBoxLayout()
+        self.path_edit = QLineEdit(initial_path or ".")
+        self.path_edit.returnPressed.connect(self.refresh)
+        path_row.addWidget(self.path_edit)
+        self.go_button = QPushButton("Go")
+        self.go_button.clicked.connect(self.refresh)
+        path_row.addWidget(self.go_button)
+        layout.addLayout(path_row)
+
+        self.entries = QListWidget()
+        self.entries.itemDoubleClicked.connect(self.open_entry)
+        layout.addWidget(self.entries)
+        self.status = QLabel("Loading remote directory…")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+        button_row = QHBoxLayout()
+        self.up_button = QPushButton("Up")
+        self.up_button.clicked.connect(self.go_up)
+        button_row.addWidget(self.up_button)
+        button_row.addStretch(1)
+        self.select_button = QPushButton("Select current folder")
+        self.select_button.clicked.connect(self.select_current)
+        button_row.addWidget(self.select_button)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(self.cancel_button)
+        layout.addLayout(button_row)
+        self.refresh()
+
+    def set_controls_enabled(self, enabled: bool) -> None:
+        self.path_edit.setEnabled(enabled)
+        self.go_button.setEnabled(enabled)
+        self.entries.setEnabled(enabled)
+        self.up_button.setEnabled(enabled)
+        self.select_button.setEnabled(enabled)
+        self.cancel_button.setEnabled(enabled)
+
+    def start_operation(self, requested_path: str, *, validate: bool = False, allow_fallback: bool = True) -> None:
+        if self.operation_thread is not None:
+            return
+        self.operation_requested_path = requested_path
+        self.operation_allow_fallback = allow_fallback
+        self.operation_error = None
+        self.pending_validation = None
+        self.set_controls_enabled(False)
+        self.status.setText("Checking remote folder…" if validate else "Loading remote directory…")
+
+        thread = QThread(self)
+        worker = RemoteDirectoryWorker(self.session, requested_path, validate)
+        worker.moveToThread(thread)
+        self.operation_thread = thread
+        self.operation_worker = worker
+        worker.directory_loaded.connect(self.directory_loaded)
+        worker.validation_finished.connect(self.validation_finished)
+        worker.failed.connect(self.operation_failed)
+        thread.started.connect(worker.run)
+        worker.directory_loaded.connect(thread.quit)
+        worker.validation_finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.directory_loaded.connect(worker.deleteLater)
+        worker.validation_finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(self.operation_finished)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def refresh(self) -> None:
+        requested = self.path_edit.text().strip() or "."
+        self.start_operation(requested)
+
+    def directory_loaded(self, normalized: str, entries: list[tuple[str, bool]]) -> None:
+        self.fallback_path = normalized
+        self.path_edit.setText(normalized)
+        self.entries.clear()
+        for name, is_directory in entries:
+            if is_directory:
+                self.entries.addItem(f"📁 {name}")
+        if not entries:
+            self.status.setText("This directory is empty.")
+        elif not any(is_directory for _, is_directory in entries):
+            self.status.setText("No subdirectories. If this is a record folder, select the current folder.")
+        else:
+            self.status.setText("Double-click a directory to open it, or select the current folder when it is a BraTS record.")
+
+    def validation_finished(self, normalized: str, valid: bool) -> None:
+        self.pending_validation = (normalized, valid)
+
+    def operation_failed(self, message: str) -> None:
+        self.operation_error = message
+
+    def operation_finished(self) -> None:
+        thread = self.operation_thread
+        self.operation_thread = None
+        self.operation_worker = None
+        self.set_controls_enabled(True)
+
+        if self.operation_error is not None:
+            if self.operation_allow_fallback and self.operation_requested_path != self.fallback_path:
+                self.path_edit.setText(self.fallback_path)
+                self.status.setText(f"Remembered folder was unavailable; reopened {self.fallback_path}.")
+                self.start_operation(self.fallback_path, allow_fallback=False)
+                return
+            self.status.setText(f"Could not read remote directory: {self.operation_error}")
+            return
+
+        if self.pending_validation is not None:
+            normalized, valid = self.pending_validation
+            self.pending_validation = None
+            if not valid:
+                QMessageBox.warning(
+                    self,
+                    "Not a BraTS record",
+                    "Select a remote folder containing its _seg.nii or _seg.nii.gz file.",
+                )
+                return
+            self.selected_remote_path = normalized
+            remember_remote_directory(self.session.profile_name, normalized)
+            self.accept()
+
+    def open_entry(self, item: object) -> None:
+        name = str(item.text()).removeprefix("📁 ")
+        self.path_edit.setText(posixpath.join(self.path_edit.text(), name))
+        self.refresh()
+
+    def go_up(self) -> None:
+        current = self.path_edit.text().rstrip("/") or "/"
+        self.path_edit.setText(posixpath.dirname(current) or "/")
+        self.refresh()
+
+    def select_current(self) -> None:
+        requested = self.path_edit.text().strip() or "."
+        self.start_operation(requested, validate=True, allow_fallback=False)
+
+    def reject(self) -> None:
+        if self.operation_thread is not None:
+            return
+        super().reject()
+
+
+def select_remote_directory(session: SSHSession, parent: QWidget | None = None) -> str | None:
+    dialog = RemoteDirectoryDialog(
+        session,
+        parent,
+        remembered_remote_directory(session.profile_name),
+    )
+    if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_remote_path is None:
+        return None
+    return dialog.selected_remote_path
+
+
+class InitialSubjectDialog(QDialog):
+    """Choose the data source before the viewer's normal subject controls open."""
+
+    def __init__(self, dataset_root: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.dataset_root = dataset_root
+        self.selected_subject: Path | None = None
+        self.ssh_session: SSHSession | None = None
+        self.remote_path: str | None = None
+        self.preloaded_volumes: dict[str, np.ndarray] | None = None
+        self.preloaded_mask: np.ndarray | None = None
+        self.setWindowTitle("Choose BraTS data source")
+        self.setMinimumWidth(450)
+
+        layout = QVBoxLayout(self)
+        title = QLabel("Choose a local folder, or connect over SSH before selecting a remote folder.")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        self.local_button = QPushButton("Select local record folder…")
+        self.local_button.clicked.connect(self.select_local_folder)
+        layout.addWidget(self.local_button)
+
+        self.ssh_button = QPushButton("Connect over SSH and select remote folder…")
+        self.ssh_button.clicked.connect(self.select_remote_folder)
+        layout.addWidget(self.ssh_button)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        layout.addWidget(self.cancel_button)
+        self.remote_download_active = False
+
+    def select_local_folder(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select BraTS record folder",
+            remembered_local_directory(self.dataset_root),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not selected:
+            return
+        selected_path = Path(selected).expanduser().resolve()
+        if not selected_path.is_dir() or subject_files(selected_path)[1] is None:
+            QMessageBox.warning(
+                self,
+                "Not a BraTS record",
+                "Select a folder containing its _seg.nii or _seg.nii.gz file.",
+            )
+            return
+        if self.ssh_session is not None:
+            self.ssh_session.close()
+            self.ssh_session = None
+        remember_local_directory(selected_path)
+        self.selected_subject = selected_path
+        self.accept()
+
+    def select_remote_folder(self) -> None:
+        if self.remote_download_active:
+            return
+        new_session = open_ssh_session(self)
+        if new_session is None:
+            return
+        if self.ssh_session is not None:
+            self.ssh_session.close()
+        self.ssh_session = new_session
+        selected_remote_path = select_remote_directory(self.ssh_session, self)
+        if selected_remote_path is None:
+            return
+        self.remote_path = selected_remote_path
+        self.remote_download_active = True
+        self.local_button.setEnabled(False)
+        self.ssh_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        start_remote_subject_download(
+            self.ssh_session,
+            selected_remote_path,
+            self,
+            self.remote_download_finished,
+            self.remote_download_failed,
+        )
+
+    def remote_download_finished(
+        self,
+        local_path: Path,
+        volumes: dict[str, np.ndarray],
+        mask: np.ndarray | None,
+    ) -> None:
+        self.remote_download_active = False
+        self.selected_subject = local_path
+        self.preloaded_volumes = volumes
+        self.preloaded_mask = mask
+        self.accept()
+
+    def remote_download_failed(self, message: str) -> None:
+        self.remote_download_active = False
+        self.remote_path = None
+        self.local_button.setEnabled(True)
+        self.ssh_button.setEnabled(True)
+        self.cancel_button.setEnabled(True)
+        QMessageBox.critical(self, "Remote folder download failed", message)
+
+    def reject(self) -> None:
+        if self.remote_download_active:
+            return
+        if self.ssh_session is not None and self.selected_subject is None:
+            self.ssh_session.close()
+            self.ssh_session = None
+        super().reject()
+
+
+def select_initial_subject(
+    dataset_root: Path,
+) -> tuple[Path, SSHSession | None, str | None, dict[str, np.ndarray] | None, np.ndarray | None] | None:
+    dialog = InitialSubjectDialog(dataset_root)
+    if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_subject is None:
+        return None
+    return (
+        dialog.selected_subject,
+        dialog.ssh_session,
+        dialog.remote_path,
+        dialog.preloaded_volumes,
+        dialog.preloaded_mask,
+    )
 
 
 def modality_sort_key(path: Path) -> tuple[int, str]:
@@ -63,10 +957,10 @@ def modality_sort_key(path: Path) -> tuple[int, str]:
 def subject_files(subject_dir: Path) -> tuple[list[Path], Path | None]:
     files = [path for path in subject_dir.iterdir() if path.is_file() and is_nifti_file(path)]
     scans = sorted(
-        [path for path in files if "_seg" not in path.name and not is_frequency_file(path)],
+        [path for path in files if "_seg" not in path.name.lower() and not is_frequency_file(path)],
         key=modality_sort_key,
     )
-    segmentation = next((path for path in files if "_seg" in path.name), None)
+    segmentation = next((path for path in files if "_seg" in path.name.lower()), None)
     return scans[:4], segmentation
 
 
@@ -403,6 +1297,7 @@ class SubjectSelectorWidget(QWidget):
         frequency_mask_layers: list[napari.layers.Labels],
         output_layers: list[napari.layers.Image | napari.layers.Labels],
         results_root: Path,
+        ssh_session: SSHSession | None = None,
     ) -> None:
         super().__init__()
         # Keep the control dock compact so the image grid gets most of the
@@ -418,11 +1313,14 @@ class SubjectSelectorWidget(QWidget):
         self.frequency_mask_layers = frequency_mask_layers
         self.output_layers = output_layers
         self.results_root = results_root
+        self.ssh_session = ssh_session
         self.current_scan_index: dict[str, Path] = {}
         self.current_mask: np.ndarray | None = None
         self.current_subject_dir: Path | None = None
         self.current_output_mask: np.ndarray | None = None
         self.checkpoint_index: dict[str, Path] = {}
+        self.remote_download_active = False
+        self.pending_remote_path: str | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -450,9 +1348,23 @@ class SubjectSelectorWidget(QWidget):
         title.setStyleSheet("font-weight: 600;")
         layout.addWidget(title)
 
-        self.select_record_button = QPushButton("Select record folder…")
+        self.ssh_button = QPushButton("Connect over SSH…")
+        self.ssh_button.clicked.connect(self.connect_ssh)
+        layout.addWidget(self.ssh_button)
+
+        self.ssh_status = QLabel()
+        self.ssh_status.setWordWrap(True)
+        self.ssh_status.setStyleSheet("color: palette(mid); font-size: 11px;")
+        layout.addWidget(self.ssh_status)
+
+        self.select_record_button = QPushButton("Select local record folder…")
         self.select_record_button.clicked.connect(self.select_record_folder)
         layout.addWidget(self.select_record_button)
+
+        self.select_remote_button = QPushButton("Select remote record folder…")
+        self.select_remote_button.clicked.connect(self.select_remote_record_folder)
+        self.select_remote_button.setEnabled(self.ssh_session is not None)
+        layout.addWidget(self.select_remote_button)
 
         self.selected_record = QLabel()
         self.selected_record.setWordWrap(True)
@@ -510,6 +1422,32 @@ class SubjectSelectorWidget(QWidget):
         layout.addStretch(1)
 
         self.on_subject_changed(initial_subject)
+        self.update_ssh_status()
+
+    def update_ssh_status(self) -> None:
+        if self.ssh_session is None:
+            self.ssh_status.setText("SSH is optional. Local folder selection is ready.")
+            self.select_remote_button.setEnabled(False)
+            self.ssh_button.setText("Connect over SSH…")
+        else:
+            self.ssh_status.setText("SSH connected. The selected remote subject is cached locally for this session.")
+            self.select_remote_button.setEnabled(True)
+            self.ssh_button.setText("Reconnect over SSH…")
+
+    def connect_ssh(self) -> None:
+        new_session = open_ssh_session(self)
+        if new_session is None:
+            return
+        if self.ssh_session is not None:
+            self.ssh_session.close()
+        self.ssh_session = new_session
+        self.update_ssh_status()
+        self.select_remote_record_folder()
+
+    def close_resources(self) -> None:
+        if self.ssh_session is not None:
+            self.ssh_session.close()
+            self.ssh_session = None
 
     def set_checkpoint_controls_visible(self, visible: bool) -> None:
         """Show checkpoint controls only for the output-analysis view."""
@@ -526,7 +1464,7 @@ class SubjectSelectorWidget(QWidget):
         selected = QFileDialog.getExistingDirectory(
             self,
             "Select BraTS record folder",
-            str(self.dataset_root),
+            remembered_local_directory(self.dataset_root),
             QFileDialog.Option.ShowDirsOnly,
         )
         if not selected:
@@ -539,7 +1477,59 @@ class SubjectSelectorWidget(QWidget):
             )
             return
 
+        remember_local_directory(selected_path)
         self.on_subject_changed(selected_path)
+
+    def select_remote_record_folder(self) -> None:
+        """Browse remote directories and download one record in the background."""
+        if self.remote_download_active:
+            return
+        if self.ssh_session is None:
+            self.connect_ssh()
+            return
+        self.ssh_status.setText("Choose a remote record folder…")
+        remote_path = select_remote_directory(self.ssh_session, self)
+        if remote_path is None:
+            self.update_ssh_status()
+            return
+        self.remote_download_active = True
+        self.pending_remote_path = remote_path
+        self.select_record_button.setEnabled(False)
+        self.select_remote_button.setEnabled(False)
+        self.ssh_button.setEnabled(False)
+        self.ssh_status.setText("Preparing remote folder download…")
+        start_remote_subject_download(
+            self.ssh_session,
+            remote_path,
+            self,
+            self.remote_download_finished,
+            self.remote_download_failed,
+        )
+
+    def remote_download_finished(
+        self,
+        local_path: Path,
+        volumes: dict[str, np.ndarray],
+        mask: np.ndarray | None,
+    ) -> None:
+        self.remote_download_active = False
+        remote_path = self.pending_remote_path or "(remote folder)"
+        self.pending_remote_path = None
+        self.on_subject_changed(local_path, (volumes, mask))
+        self.selected_record.setText(f"Selected remote: {remote_path}\nCached at: {local_path}")
+        self.ssh_status.setText("SSH connected. The selected remote subject is cached locally for this session.")
+        self.select_record_button.setEnabled(True)
+        self.select_remote_button.setEnabled(True)
+        self.ssh_button.setEnabled(True)
+
+    def remote_download_failed(self, message: str) -> None:
+        self.remote_download_active = False
+        self.pending_remote_path = None
+        self.update_ssh_status()
+        self.select_record_button.setEnabled(True)
+        self.select_remote_button.setEnabled(True)
+        self.ssh_button.setEnabled(True)
+        QMessageBox.critical(self, "Remote folder download failed", message)
 
     def refresh_checkpoint_options(self) -> None:
         """Re-scan ``result`` whenever Output Analysis is opened."""
@@ -753,13 +1743,17 @@ class SubjectSelectorWidget(QWidget):
         )
         self.viewer.reset_view()
 
-    def on_subject_changed(self, subject_dir: Path) -> None:
+    def on_subject_changed(
+        self,
+        subject_dir: Path,
+        preloaded: tuple[dict[str, np.ndarray], np.ndarray | None] | None = None,
+    ) -> None:
         subject_dir = subject_dir.expanduser().resolve()
         if subject_files(subject_dir)[1] is None:
             return
 
         self.selected_record.setText(f"Selected: {subject_dir}")
-        volumes, mask = load_subject(subject_dir)
+        volumes, mask = preloaded if preloaded is not None else load_subject(subject_dir)
         scan_paths, _ = subject_files(subject_dir)
         scan_names = list(volumes.keys())
         self.current_scan_index = {name: path for name, path in zip(scan_names, scan_paths)}
@@ -802,10 +1796,13 @@ def add_subject_layers(
     dataset_root: Path,
     initial_subject: Path,
     results_root: Path,
+    ssh_session: SSHSession | None = None,
+    remote_path: str | None = None,
+    initial_data: tuple[dict[str, np.ndarray], np.ndarray | None] | None = None,
 ) -> None:
     viewer.layers.clear()
 
-    volumes, mask = load_subject(initial_subject)
+    volumes, mask = initial_data if initial_data is not None else load_subject(initial_subject)
 
     image_layers: list[napari.layers.Image] = []
     input_grid_padding_layers: list[napari.layers.Image] = []
@@ -1023,7 +2020,12 @@ def add_subject_layers(
         frequency_mask_layers,
         output_layers,
         results_root,
+        ssh_session,
     )
+    if remote_path is not None:
+        selector.selected_record.setText(
+            f"Selected remote: {remote_path}\nCached at: {initial_subject}"
+        )
     viewer.window.add_dock_widget(
         selector,
         name="subject selector",
@@ -1052,6 +2054,12 @@ def add_subject_layers(
     viewer.fit_to_view()
     viewer.title = f"BraTS viewer — {initial_subject.name}"
 
+    from qtpy.QtWidgets import QApplication
+
+    application = QApplication.instance()
+    if application is not None:
+        application.aboutToQuit.connect(selector.close_resources)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1071,30 +2079,40 @@ def main() -> None:
     dataset_root = args.dataset_root.expanduser().resolve()
     results_root = args.results_root.expanduser().resolve()
     viewer = napari.Viewer(ndisplay=3, title="BraTS Napari viewer")
+    ssh_session: SSHSession | None = None
+    remote_path: str | None = None
+    initial_data: tuple[dict[str, np.ndarray], np.ndarray | None] | None = None
 
     if args.subject:
         requested = Path(args.subject).expanduser()
         initial_subject = requested if requested.is_absolute() else dataset_root / requested
     else:
-        selected = QFileDialog.getExistingDirectory(
-            None,
-            "Select BraTS record folder",
-            str(dataset_root),
-            QFileDialog.Option.ShowDirsOnly,
-        )
-        if not selected:
+        selected = select_initial_subject(dataset_root)
+        if selected is None:
             viewer.close()
             raise SystemExit("No BraTS record selected.")
-        initial_subject = Path(selected).expanduser().resolve()
+        initial_subject, ssh_session, remote_path, preloaded_volumes, preloaded_mask = selected
+        if preloaded_volumes is not None:
+            initial_data = (preloaded_volumes, preloaded_mask)
 
     if not initial_subject.is_dir() or subject_files(initial_subject)[1] is None:
+        if ssh_session is not None:
+            ssh_session.close()
         viewer.close()
         raise SystemExit(
             f"Not a BraTS record folder: {initial_subject}. "
             "Expected a folder containing _seg.nii or _seg.nii.gz."
         )
 
-    add_subject_layers(viewer, dataset_root, initial_subject, results_root)
+    add_subject_layers(
+        viewer,
+        dataset_root,
+        initial_subject,
+        results_root,
+        ssh_session,
+        remote_path,
+        initial_data,
+    )
     napari.run()
 
 

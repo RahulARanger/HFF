@@ -15,3 +15,5 @@ STDIN.*
 result/cross_validation
 .virtual_documents
 node_modules
+result/cross_eval
+NUL

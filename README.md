@@ -240,6 +240,44 @@ result/cross_validation/
     └── fold_1/ ... fold_5/
 ```
 
+For a cluster with a per-job wall-time limit, prepare the run once and execute
+one fold per job. A prepared run keeps the deterministic patient split and all
+fold output directories fixed:
+
+```bash
+python cross_train.py \
+  dataset/brats2019/extracted/MICCAI_BraTS_2019_Data_Training \
+  --epochs 350 --seed 42 --results-dir result/cross_validation \
+  --run-name brats19_all_seed42 --dry-run \
+  -- --dataset_name brats19 --class_type all --batch_size 1
+
+python cross_train.py \
+  dataset/brats2019/extracted/MICCAI_BraTS_2019_Data_Training \
+  --fold-index 1 --run-dir result/cross_validation/brats19_all_seed42 \
+  --epochs 350 --seed 42 \
+  -- --dataset_name brats19 --class_type all --batch_size 1
+```
+
+The `--fold-index` option is one-based and optional. If omitted, all folds run
+sequentially. `--run-dir` is also optional: omit it for a new timestamped run;
+provide it when reusing a run prepared with `--dry-run`, so the deterministic
+split lists and fold output directories remain fixed. The convenience wrapper
+prepares the run and submits all folds sequentially, so Fold 2 starts only
+after Fold 1 succeeds:
+
+```bash
+HFF_GPU_DEVICE=<allocated-MIG-UUID> \
+  scripts/submit_train_cv_chain.sh \
+  dataset/brats2019/extracted/MICCAI_BraTS_2019_Data_Training \
+  --run-name brats19_all_seed42 --epochs 350 --seed 42 -- \
+  --dataset_name brats19 --class_type all --batch_size 1
+```
+
+Each fold job requests `workq` with `walltime=48:00:00` and one GPU. If the
+chain wrapper is not used, submit `scripts/submit_train_gpu.pbs` directly. You
+may omit both `--fold-index` and `--run-dir` to run a fresh all-fold job, or
+provide them when running a specific fold from a prepared run.
+
 ### Running frequency generation and training with PBS
 
 PBS wrappers for the institute cluster are provided in `scripts/`. Submit them from the repository root:
@@ -255,15 +293,14 @@ qsub -- "$PWD/scripts/submit_high_freq_cpu.pbs" \
 qsub -v HFF_GPU_DEVICE=<allocated-MIG-UUID>,HFF_CONDA_BASE=/path/to/conda \
   -- "$PWD/scripts/submit_train_gpu.pbs" \
   dataset/brats2019/splits/explore \
-  --run-name explore_brats19 \
   --epochs 350 \
   -- --dataset_name brats19 --class_type all
 ```
 
-The GPU wrapper forwards all options to `cross_train.py`; options after the
-second `--` are forwarded by `cross_train.py` to `train.py`. Select a single
-physical GPU or MIG UUID with `HFF_GPU_DEVICE` or `--gpu-device`. Inside the
-job, the selected device is visible to PyTorch as `cuda:0`.
+The GPU wrapper forwards the selected fold options to `cross_train.py`; options
+after the second `--` are forwarded by `cross_train.py` to `train.py`. Select a
+single physical GPU or MIG UUID with `HFF_GPU_DEVICE` or `--gpu-device`. Inside
+the job, the selected device is visible to PyTorch as `cuda:0`.
 
 Validation reduces each branch prediction to class labels immediately and
 computes the existing groupwise Dice/HD95 metrics in bounded CPU buffers. The
@@ -274,6 +311,31 @@ wrapper requests one GPU with 12 CPU cores and 64 GB of host memory.
 The low-frequency and MATLAB high-frequency jobs use `cpuq` with 16 CPU cores. Submit high-frequency work with `submit_high_freq_cpu.pbs`; `submit_high_freq_gpu.pbs` remains as a compatibility alias. The high-frequency MATLAB code uses CPU `parfor` subject-level parallelism; it does not call `gpuArray`, `gpuDevice`, or another GPU API. Only the training job uses `workq` and requires `CUDA_VISIBLE_DEVICES`. Conda is required for the low-frequency and training wrappers, but not for the MATLAB high-frequency wrapper. All wrappers accept command-line paths; environment variables `HFF_INPUT_PATH`, `HFF_TRAIN_LIST`, and `HFF_VAL_LIST` remain available as defaults.
 
 To monitor jobs, list your queued and running jobs with `qstat -u "$USER"`, inspect one job with `qstat -f JOB_ID`, and cancel it with `qdel JOB_ID`. The job ID is printed by `qsub` after submission. Since the wrappers use `#PBS -j oe`, standard output and error are combined; their location is shown by the `Output_Path` and `Error_Path` fields in `qstat -f JOB_ID`.
+
+## 🧠 Napari scan viewer
+
+Launch the desktop viewer with:
+
+```bash
+python napari_viewer.py
+```
+
+At startup, choose a local BraTS record folder or connect over SSH first. The
+The SSH form reads the same OpenSSH config used by VS Code Remote-SSH
+(`remote.SSH.configFile` when configured, otherwise `~/.ssh/config`) and lets
+you choose a named `Host` profile from a dropdown. Host, port, username,
+identity files, and proxy settings are taken from that profile; only an
+optional password or key passphrase is entered interactively. Profiles using
+keyboard-interactive authentication are supported, and the viewer prompts for
+the password when no SSH key or agent identity is available. After connecting,
+browse the remote directories and select a folder containing `_seg.nii` or
+`_seg.nii.gz`. The selected record's NIfTI files are downloaded to a temporary
+local cache for the active Napari session; the remote directory is never
+modified. SSH is optional, and the local folder flow remains available from
+the viewer sidebar. Remote downloads and initial MRI loading run in the
+background with progress feedback so the Napari window remains responsive.
+The viewer also remembers the last local folder and the last remote parent
+directory for each SSH profile, without storing credentials.
 
 ## 🖥️ Browser scan viewer
 
