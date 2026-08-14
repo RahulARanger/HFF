@@ -456,8 +456,24 @@ The web viewer's evaluation page only generates commands; it does not launch
 inference directly. The first command box runs `cross_eval.py` in the current
 shell. The second submits the same command through
 `scripts/submit_eval_gpu.pbs`, which requests one GPU from the `workq` queue.
-Replace the GPU/MIG placeholder with a device listed by `nvidia-smi -L` before
-submitting the PBS command.
+Enter the GPU/MIG device and Conda base in the form using values valid on the
+cluster; the form saves these values and the other evaluation selections in
+the browser's local storage for reuse. The generated PBS command includes the
+explicit `workq`, resource, absolute script path, `HFF_CONDA_BASE`,
+`HFF_GPU_DEVICE`, `WANDB_MODE`, and `HFF_CONDA_ENV` settings. If no GPU is
+entered, replace the placeholder before submitting. PBS evaluations are
+registered in the Validation monitor through
+`validation_job_<PBS job id>.json`, `nvidia_resource_usage.jsonl`, and the
+matching resource summary written under a job-specific monitor directory
+beside the evaluation output directory.
+The PBS launcher also rewrites the progress path to
+`cross_eval_progress_<PBS job id>.json`, preventing concurrent jobs from
+and stores the checkpoint list, per-checkpoint result files, and aggregate
+summary under `pbs_eval_<PBS job id>/` below the requested `--output_dir`.
+This prevents a previous run's summary from making a new multi-checkpoint job
+appear to contain only one checkpoint.
+Keep `--output_dir` under the viewer's configured results root (normally
+`result/`) so the monitor can discover the job.
 
 ```--selected_modal```: list of input modalities (same as used during training)
 

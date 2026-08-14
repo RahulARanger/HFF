@@ -466,6 +466,18 @@ class ViewerServer:
         if isinstance(progress_value, str):
             progress = read_json(Path(progress_value))
         persisted_status = job.get("status")
+        if persisted_status == "completed" and progress:
+            completed_total = progress.get("overall_total_samples", progress.get("total_samples"))
+            if isinstance(completed_total, (int, float)) and completed_total >= 0:
+                completed_total = int(completed_total)
+                progress = {
+                    **progress,
+                    "phase": "completed",
+                    "processed_samples": completed_total,
+                    "total_samples": completed_total,
+                    "overall_processed_samples": completed_total,
+                    "overall_total_samples": completed_total,
+                }
         status = str(persisted_status or ("completed" if summary else "stale"))
         started_at = job.get("started_at") or summary.get("started_at_utc") or (
             samples[0].get("timestamp_utc") if samples else None

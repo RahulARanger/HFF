@@ -35,6 +35,30 @@ def option_value(arguments: list[str], name: str, default: str | None = None) ->
     return default
 
 
+def replace_option(arguments: list[str], name: str, value: str) -> list[str]:
+    """Replace an option value while preserving the cross_eval argument order."""
+    updated: list[str] = []
+    index = 0
+    replaced = False
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == name:
+            updated.extend((name, value))
+            index += 2
+            replaced = True
+            continue
+        if argument.startswith(f"{name}="):
+            updated.append(f"{name}={value}")
+            index += 1
+            replaced = True
+            continue
+        updated.append(argument)
+        index += 1
+    if not replaced:
+        updated.extend((name, value))
+    return updated
+
+
 def resolve_path(value: str | None, base: Path) -> Path | None:
     if not value:
         return None
@@ -45,10 +69,16 @@ def resolve_path(value: str | None, base: Path) -> Path | None:
 def checkpoint_paths(checkpoint_list: Path | None) -> list[str]:
     if checkpoint_list is None or not checkpoint_list.is_file():
         return []
-    return [
+    paths = [
         line.strip()
         for line in checkpoint_list.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return [
+        str((checkpoint_list.parent / path).resolve())
+        if not Path(path).expanduser().is_absolute()
+        else str(Path(path).expanduser().resolve())
+        for path in paths
     ]
 
 
@@ -84,18 +114,25 @@ def main() -> int:
     args = parse_args()
     repo_root = args.repo_root.expanduser().resolve()
     cross_eval_args = list(args.cross_eval_args)
-    output_dir = resolve_path(option_value(cross_eval_args, "--output_dir"), repo_root)
-    if output_dir is None:
+    requested_output_dir = resolve_path(option_value(cross_eval_args, "--output_dir"), repo_root)
+    if requested_output_dir is None:
         raise ValueError("PBS evaluation requires --output_dir so monitor telemetry has a stable location.")
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     job_id = args.job_id.replace("/", "_")
     job_name = args.job_name.strip() or f"PBS evaluation {job_id}"
-    checkpoint_list = resolve_path(option_value(cross_eval_args, "--checkpoint_list"), repo_root)
+    requested_checkpoint_list = resolve_path(option_value(cross_eval_args, "--checkpoint_list"), repo_root)
     test_list = resolve_path(option_value(cross_eval_args, "--test_list"), repo_root)
-    progress_file = resolve_path(option_value(cross_eval_args, "--progress_file"), repo_root)
+    output_dir = requested_output_dir / f"pbs_eval_{job_id}"
+    requested_output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_list = output_dir / f"checkpoint_list_{job_id}.txt"
+    checkpoint_list.write_text("\n".join(checkpoint_paths(requested_checkpoint_list)) + "\n", encoding="utf-8")
+    progress_file = output_dir / f"cross_eval_progress_{job_id}.json"
+    cross_eval_args = replace_option(cross_eval_args, "--checkpoint_list", str(checkpoint_list))
+    cross_eval_args = replace_option(cross_eval_args, "--output_dir", str(output_dir))
+    cross_eval_args = replace_option(cross_eval_args, "--progress_file", str(progress_file))
     summary_file = output_dir / "cross_eval_summary.json"
-    manifest_file = output_dir / f"validation_job_{job_id}.json"
+    manifest_file = requested_output_dir / f"validation_job_{job_id}.json"
     log_file = output_dir / f"cross_eval_{job_id}.log"
     telemetry_dir = output_dir / f"validation_monitor_{job_id}"
     telemetry_dir.mkdir(parents=True, exist_ok=True)
@@ -106,6 +143,7 @@ def main() -> int:
         "fold": None,
         "checkpoints": checkpoint_paths(checkpoint_list),
         "output_dir": str(output_dir),
+        "requested_output_dir": str(requested_output_dir),
         "test_list": str(test_list) if test_list else None,
         "dataset_name": option_value(cross_eval_args, "--dataset_name", "brats19"),
         "class_type": option_value(cross_eval_args, "--class_type", "all"),
@@ -128,7 +166,7 @@ def main() -> int:
         "log_file": str(log_file),
         "progress_file": str(progress_file) if progress_file else None,
         "summary_file": str(summary_file),
-        "checkpoint_list_file": str(checkpoint_list) if checkpoint_list else None,
+        "checkpoint_list_file": str(checkpoint_list),
         "manifest_file": str(manifest_file),
         "resource_monitor_interval": args.resource_monitor_interval,
         "resource_monitoring": "starting",
