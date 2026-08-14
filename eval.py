@@ -11,7 +11,11 @@ from tqdm import tqdm
 import wandb
 import nibabel as nib
 
-from config.train_test_config.train_test_config import print_val_loss, print_val_eval_metrics
+from config.train_test_config.train_test_config import (
+    print_val_eval_metrics,
+    print_val_jaccard_metrics,
+    print_val_loss,
+)
 from config.eval_config.eval import StreamingValidationMetrics
 from config.warmup_config.warmup import GradualWarmupScheduler
 from loss.loss_function import segmentation_loss
@@ -95,8 +99,8 @@ def add_evaluation_arguments(parser, include_checkpoint=True, include_output_dir
     parser.add_argument(
         '--num_workers',
         type=int,
-        default=3,
-        help='DataLoader worker processes for inference (default: 5).',
+        default=8,
+        help='DataLoader worker processes for inference (default: 8).',
     )
     parser.add_argument('-l','--loss', type=str, default='dice')
     parser.add_argument('--loss2', type=str, default='ff')
@@ -197,7 +201,9 @@ def evaluate_checkpoint(args, checkpoint_path=None, device=None):
 
     print_val_loss(val_loss_sup_1, val_loss_sup_2, {'val': num_batches}, 63, 0)
     val_eval_list_1, val_eval_list_2 = validation_metrics.compute()
+    val_jaccard_list_1, val_jaccard_list_2 = validation_metrics.compute_jaccard()
     print_val_eval_metrics(classnum, val_eval_list_1, val_eval_list_2, 31)
+    print_val_jaccard_metrics(classnum, val_jaccard_list_1, val_jaccard_list_2, 31)
 
     return {
         'checkpoint': str(checkpoint_path),
@@ -210,6 +216,10 @@ def evaluate_checkpoint(args, checkpoint_path=None, device=None):
         'metrics': {
             'branch_1': list(val_eval_list_1),
             'branch_2': list(val_eval_list_2),
+        },
+        'jaccard': {
+            'branch_1': list(val_jaccard_list_1),
+            'branch_2': list(val_jaccard_list_2),
         },
     }
 

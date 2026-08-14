@@ -238,7 +238,7 @@ function EpochLineChart({ history }) {
         {series.map((item) => Number.isFinite(Number(hoveredRow[item.field])) && <span key={item.field}><i style={{ background: item.color }} />{item.label}: {Number(hoveredRow[item.field]).toFixed(4)}</span>)}
         </div>}
       </div>
-      <div className="epoch-chart-axis" aria-hidden="true">{rows.map((row) => <span key={row.epoch}>Epoch {row.epoch}</span>)}</div>
+      <div className="epoch-chart-axis" aria-hidden="true">{rows.map((row) => <span key={row.epoch}>{row.epoch}</span>)}</div>
     </div>
   );
 }
@@ -330,6 +330,16 @@ function SummaryCard({ label, value, total, tone, progress }) {
       <div className="summary-card-label"><span className="summary-dot" />{label}</div>
       <div className="summary-card-value"><strong>{value}</strong><span>/ {total ?? "—"}</span></div>
       <Progress value={progress} className="summary-progress" />
+    </Card>
+  );
+}
+
+function LatestRunCard({ label, value, detail, tone, progress }) {
+  return (
+    <Card className={`summary-card ${tone}`}>
+      <div className="summary-card-label"><span className="summary-dot" />{label}</div>
+      <div className="summary-card-value"><strong>{value}</strong><span>{detail}</span></div>
+      {progress !== undefined && <Progress value={progress} className="summary-progress" />}
     </Card>
   );
 }
@@ -536,13 +546,16 @@ export default function MonitorView() {
     };
   }, [selectedId]);
 
-  const activeCount = runs.filter((run) => run.status === "running").length;
-  const completedCount = runs.filter((run) => run.status === "completed").length;
-  const epochsCompleted = runs.reduce((total, run) => total + (run.training?.completed_epochs || 0), 0);
-  const epochsPending = runs.reduce((total, run) => total + (run.training?.pending_epochs || 0), 0);
-  const totalEpochs = runs.reduce((total, run) => total + (Number(run.training?.total_epochs) || 0), 0);
-  const totalRuns = Math.max(runs.length, 1);
-  const epochDenominator = Math.max(totalEpochs, epochsCompleted + epochsPending, 1);
+  const latestRun = [...runs].sort((left, right) => {
+    const rightTime = new Date(right.updated_at || right.started_at || 0).getTime() || 0;
+    const leftTime = new Date(left.updated_at || left.started_at || 0).getTime() || 0;
+    return rightTime - leftTime;
+  })[0] || null;
+  const latestRunTraining = latestRun?.training || {};
+  const latestRunLatest = latestRun?.latest || {};
+  const latestRunCompleted = Number(latestRunTraining.completed_epochs) || 0;
+  const latestRunTotal = Number(latestRunTraining.total_epochs) || 0;
+  const latestRunProgress = Number(latestRunTraining.progress_percent) || (latestRunTotal ? (latestRunCompleted / latestRunTotal) * 100 : 0);
   const samples = detail?.samples || [];
   const latest = detail?.latest || {};
   const handleRefresh = async () => {
@@ -571,10 +584,10 @@ export default function MonitorView() {
       </header>
 
       <div className="monitor-summary-strip">
-        <SummaryCard label="Active folds" value={activeCount} total={runs.length || "—"} progress={(activeCount / totalRuns) * 100} tone="blue" />
-        <SummaryCard label="Completed folds" value={completedCount} total={runs.length || "—"} progress={(completedCount / totalRuns) * 100} tone="teal" />
-        <SummaryCard label="Epochs completed" value={epochsCompleted} total={totalEpochs || "—"} progress={(epochsCompleted / epochDenominator) * 100} tone="teal" />
-        <SummaryCard label="Epochs pending" value={epochsPending} total={totalEpochs || "—"} progress={(epochsPending / epochDenominator) * 100} tone="muted" />
+        <LatestRunCard label="Epochs" value={latestRun ? latestRunCompleted : "—"} detail={`/ ${latestRunTotal || "—"}`} progress={latestRun ? latestRunProgress : 0} tone="blue" />
+        <LatestRunCard label="Progress" value={latestRun ? `${Math.round(latestRunProgress)}%` : "—"} detail={latestRun?.fold || "No latest run"} progress={latestRun ? latestRunProgress : 0} tone="teal" />
+        <LatestRunCard label="RAM" value={formatBytes(latestRunLatest.ram_rss_bytes)} detail="latest RSS" tone="teal" />
+        <LatestRunCard label="VRAM" value={formatBytes(latestRunLatest.gpu_memory_bytes)} detail="latest usage" tone="muted" />
       </div>
 
       {error && <div className="app-alert monitor-alert">{error}</div>}

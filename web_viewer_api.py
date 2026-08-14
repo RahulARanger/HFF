@@ -260,6 +260,10 @@ class ViewerServer:
         summary = read_json(summary_path)
         latest = samples[-1] if samples else {}
         request = job.get("request", {}) if isinstance(job.get("request"), dict) else {}
+        evaluation_summary = {}
+        evaluation_summary_value = job.get("summary_file")
+        if isinstance(evaluation_summary_value, str):
+            evaluation_summary = read_json(Path(evaluation_summary_value))
         persisted_status = job.get("status")
         status = str(persisted_status or ("completed" if summary else "stale"))
         started_at = job.get("started_at") or summary.get("started_at_utc") or (
@@ -307,6 +311,7 @@ class ViewerServer:
             "summary_file": str(summary_path) if summary_path.is_file() else None,
             "manifest_file": job.get("manifest_file"),
             "request": request,
+            "evaluation_summary": evaluation_summary,
             "latest": latest,
             "peak": {
                 "ram_rss_bytes": summary.get("peak_ram_rss_bytes") or monitor_value_peak(samples, "ram_rss_bytes"),

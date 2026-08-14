@@ -152,10 +152,16 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .evaluation-average-grid > div { border-color: rgba(80, 227, 194, 0.38); background: rgba(80, 227, 194, 0.05); }
 .evaluation-average-grid strong { overflow: hidden; color: var(--teal); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .evaluation-results { margin-top: 12px; border: 1px solid #233444; background: #070d12; }
+.validation-evaluation-results { margin-top: 14px; }
 .evaluation-results-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 11px 12px 9px; border-bottom: 1px solid #233444; }
 .evaluation-results-heading h3 { margin: 0; color: #eef5f7; font-size: 12px; }
 .evaluation-results-heading span { color: #7f919d; font-size: 9px; }
-.evaluation-results-note { color: var(--teal) !important; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.evaluation-results-note { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; color: #a9bac4 !important; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.evaluation-results-note > span { display: inline-flex; align-items: center; gap: 4px; }
+.evaluation-metric-header { display: inline-flex; align-items: center; gap: 4px; }
+.evaluation-metric-dot { display: inline-block; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; }
+.evaluation-metric-dot.purple { background: #b48cff; box-shadow: 0 0 0 2px rgba(180, 140, 255, 0.14); }
+.evaluation-metric-dot.orange { background: #f0a35b; box-shadow: 0 0 0 2px rgba(240, 163, 91, 0.14); }
 .evaluation-result-tabs { display: flex; gap: 5px; overflow-x: auto; padding: 8px 10px 0; border-bottom: 1px solid #233444; scrollbar-width: thin; }
 .evaluation-result-tab { display: flex; min-width: 118px; max-width: 210px; flex-direction: column; gap: 3px; padding: 8px 9px 7px; border: 1px solid transparent; border-bottom: 0; border-radius: 5px 5px 0 0; color: #8396a3; background: transparent; text-align: left; cursor: pointer; }
 .evaluation-result-tab:hover { color: #d9e8ef; background: rgba(0, 112, 243, 0.08); }
@@ -168,6 +174,7 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .evaluation-result-panel-heading code { overflow: hidden; color: #7898aa; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .evaluation-results-table-wrap, .evaluation-loss-table-wrap { overflow-x: auto; border: 1px solid #203442; }
 .evaluation-results-table, .evaluation-loss-table { width: 100%; border-collapse: collapse; color: #a9bac4; font-size: 9px; white-space: nowrap; }
+.evaluation-results-table { min-width: 650px; }
 .evaluation-results-table caption, .evaluation-loss-table caption { padding: 8px 9px; color: #82a0af; background: #09131b; font-size: 9px; font-weight: 700; text-align: left; }
 .evaluation-results-table th, .evaluation-results-table td, .evaluation-loss-table th, .evaluation-loss-table td { padding: 8px 9px; border-top: 1px solid #1d2d39; text-align: right; font-variant-numeric: tabular-nums; }
 .evaluation-results-table thead th, .evaluation-loss-table thead th { color: #8fa8b5; background: #081018; font-size: 8px; font-weight: 600; }
