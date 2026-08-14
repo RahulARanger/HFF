@@ -101,6 +101,10 @@ def json_safe_result(result: dict[str, Any]) -> dict[str, Any]:
         branch: [finite_float(metric) for metric in values]
         for branch, values in result['metrics'].items()
     }
+    safe_result['jaccard'] = {
+        branch: [finite_float(metric) for metric in values]
+        for branch, values in result.get('jaccard', {}).items()
+    }
     return safe_result
 
 
@@ -136,6 +140,29 @@ def aggregate_results(results: list[dict[str, Any]]) -> dict[str, Any]:
         average_metrics[branch] = averages
         metric_counts[branch] = counts
 
+    jaccard_branches = sorted({
+        branch
+        for result in results
+        for branch in result.get('jaccard', {})
+    })
+    average_jaccard: dict[str, list[float | None]] = {}
+    jaccard_counts: dict[str, list[int]] = {}
+    for branch in jaccard_branches:
+        metric_count = max(len(result.get('jaccard', {}).get(branch, [])) for result in results)
+        averages = []
+        counts = []
+        for metric_index in range(metric_count):
+            values = [
+                result.get('jaccard', {}).get(branch, [])[metric_index]
+                for result in results
+                if metric_index < len(result.get('jaccard', {}).get(branch, []))
+            ]
+            metric_average, metric_count = mean(values)
+            averages.append(metric_average)
+            counts.append(metric_count)
+        average_jaccard[branch] = averages
+        jaccard_counts[branch] = counts
+
     loss_averages = {}
     loss_counts = {}
     for field in ('validation_loss_branch_1', 'validation_loss_branch_2'):
@@ -145,9 +172,11 @@ def aggregate_results(results: list[dict[str, Any]]) -> dict[str, Any]:
         'checkpoint_count': len(results),
         'average_validation_losses': loss_averages,
         'average_metrics': average_metrics,
+        'average_jaccard': average_jaccard,
         'valid_value_counts': {
             'validation_losses': loss_counts,
             'metrics': metric_counts,
+            'jaccard': jaccard_counts,
         },
     }
 

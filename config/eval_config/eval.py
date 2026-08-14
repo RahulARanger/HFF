@@ -12,6 +12,15 @@ def compute_dice(pred, true, smooth=1e-5):
     return 2.0 * intersection / (summation + smooth)
 
 
+def compute_jaccard(pred, true, smooth=1e-5):
+    """Compute intersection-over-union for one binary segmentation mask."""
+    intersection = np.sum(pred * true)
+    union = np.sum(pred) + np.sum(true) - intersection
+    if union == 0:
+        return 1.0
+    return intersection / (union + smooth)
+
+
 def evaluate(y_scores, y_true, interval=0.02):
     y_pred = (torch.softmax(y_scores.clone().detach().to(dtype=torch.float32), dim=1)[:, 1:2, ...] > 0.5).float()
 
@@ -77,6 +86,15 @@ def evaluate_multi_binary_labels(y_pred_label, y_true):
     
     return dice, hd95
 
+
+def evaluate_multi_binary_jaccard_labels(y_pred_label, y_true):
+    """Compute Jaccard/IoU for the binary tumour mask used by evaluation."""
+    y_pred_np = y_pred_label.cpu().numpy().astype(np.int8)
+    y_true_np = y_true.cpu().numpy().astype(np.int8)
+    pred = (y_pred_np == 1).astype(np.int8)
+    true = (y_true_np == 1).astype(np.int8)
+    return (compute_jaccard(pred, true),)
+
 def evaluate_multi_binary(y_scores, y_true):
     """
     y_scores: 模型输出 logits，形状为 [B, 2, 128, 128, 128]
@@ -102,15 +120,10 @@ def evaluate_multi_labels(y_pred_label, y_true):
     y_pred_np = y_pred_label.cpu().numpy().astype(np.int8)
     y_true_np = y_true.cpu().numpy().astype(np.int8)
 
-    # 构造各结构的二值 mask
-    pred_et = (y_pred_np == 3).astype(np.int8)
-    true_et = (y_true_np == 3).astype(np.int8)
-
-    pred_tc = ((y_pred_np == 1) | (y_pred_np == 3)).astype(np.int8)
-    true_tc = ((y_true_np == 1) | (y_true_np == 3)).astype(np.int8)
-
-    pred_wt = ((y_pred_np == 1) | (y_pred_np == 2) | (y_pred_np == 3)).astype(np.int8)
-    true_wt = ((y_true_np == 1) | (y_true_np == 2) | (y_true_np == 3)).astype(np.int8)
+    region_masks = _multi_region_masks(y_pred_np, y_true_np)
+    pred_et, true_et = region_masks[0]
+    pred_tc, true_tc = region_masks[1]
+    pred_wt, true_wt = region_masks[2]
 
     # 计算 Dice 值
     dice_et = compute_dice(pred_et, true_et)
@@ -144,6 +157,27 @@ def evaluate_multi_labels(y_pred_label, y_true):
     hd95_wt = hd95_wt.item()
 
     return dice_et, hd95_et, dice_tc, hd95_tc,dice_wt, hd95_wt
+
+
+def _multi_region_masks(y_pred_np, y_true_np):
+    """Return ET, TC, and WT binary masks for predicted and true labels."""
+    return (
+        ((y_pred_np == 3).astype(np.int8), (y_true_np == 3).astype(np.int8)),
+        (((y_pred_np == 1) | (y_pred_np == 3)).astype(np.int8),
+         ((y_true_np == 1) | (y_true_np == 3)).astype(np.int8)),
+        (((y_pred_np == 1) | (y_pred_np == 2) | (y_pred_np == 3)).astype(np.int8),
+         ((y_true_np == 1) | (y_true_np == 2) | (y_true_np == 3)).astype(np.int8)),
+    )
+
+
+def evaluate_multi_jaccard_labels(y_pred_label, y_true):
+    """Compute Jaccard/IoU for ET, TC, and WT using the evaluation masks."""
+    y_pred_np = y_pred_label.cpu().numpy().astype(np.int8)
+    y_true_np = y_true.cpu().numpy().astype(np.int8)
+    return tuple(
+        compute_jaccard(pred, true)
+        for pred, true in _multi_region_masks(y_pred_np, y_true_np)
+    )
 
 
 def evaluate_multi(y_scores, y_true):
@@ -223,20 +257,28 @@ class StreamingValidationMetrics:
         self._target_buffer = []
         self._buffer_size = 0
         metric_count = 2 if num_classes == 2 else 6
+        jaccard_count = 1 if num_classes == 2 else 3
         self._metric_sums = [np.zeros(metric_count), np.zeros(metric_count)]
+        self._jaccard_sums = [np.zeros(jaccard_count), np.zeros(jaccard_count)]
         self._sample_count = 0
 
     def _record_group(self, predictions_1, predictions_2, target):
         if self.num_classes == 2:
             metric_fn = evaluate_multi_binary_labels
+            jaccard_fn = evaluate_multi_binary_jaccard_labels
         else:
             metric_fn = evaluate_multi_labels
+            jaccard_fn = evaluate_multi_jaccard_labels
 
         metrics_1 = np.asarray(metric_fn(predictions_1, target), dtype=float)
         metrics_2 = np.asarray(metric_fn(predictions_2, target), dtype=float)
+        jaccard_1 = np.asarray(jaccard_fn(predictions_1, target), dtype=float)
+        jaccard_2 = np.asarray(jaccard_fn(predictions_2, target), dtype=float)
         group_samples = predictions_1.shape[0]
         self._metric_sums[0] += metrics_1 * group_samples
         self._metric_sums[1] += metrics_2 * group_samples
+        self._jaccard_sums[0] += jaccard_1 * group_samples
+        self._jaccard_sums[1] += jaccard_2 * group_samples
         self._sample_count += group_samples
 
     def _flush_full_groups(self):
@@ -291,6 +333,13 @@ class StreamingValidationMetrics:
             self._metric_sums[1] / self._sample_count
         )
 
+    def compute_jaccard(self):
+        """Return the same grouped averages for Jaccard/IoU."""
+        self.compute()
+        return tuple(self._jaccard_sums[0] / self._sample_count), tuple(
+            self._jaccard_sums[1] / self._sample_count
+        )
+
 # def evaluate_multi(y_scores, y_true):
 
 #     y_scores = torch.softmax(y_scores, dim=1)
@@ -310,4 +359,3 @@ class StreamingValidationMetrics:
 #     m_dice = np.nanmean(dice)
 
 #     return jaccard, m_jaccard, dice, m_dice
-

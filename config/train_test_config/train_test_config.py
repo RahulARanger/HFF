@@ -207,6 +207,18 @@ def print_val_eval_metrics(num_classes, eval_list1, eval_list2, print_num):
     """Print metrics produced by ``StreamingValidationMetrics``."""
     return _print_val_eval_metrics(num_classes, eval_list1, eval_list2, print_num)
 
+
+def print_val_jaccard_metrics(num_classes, jaccard_list1, jaccard_list2, print_num):
+    """Print Jaccard/IoU values produced by ``StreamingValidationMetrics``."""
+    np.set_printoptions(precision=4, suppress=True)
+    if num_classes == 2:
+        print('| Val Jaccard LF: {:.4f}'.format(jaccard_list1[0]).ljust(print_num, ' '),
+              '| Val Jaccard HF: {:.4f}'.format(jaccard_list2[0]).ljust(print_num, ' '), '|')
+    else:
+        for index, region in enumerate(('ET', 'TC', 'WT')):
+            print('| Val {} Jaccard LF: {:.4f}'.format(region, jaccard_list1[index]).ljust(print_num, ' '),
+                  '| Val {} Jaccard HF: {:.4f}'.format(region, jaccard_list2[index]).ljust(print_num, ' '), '|')
+
 def save_val_best_sup_2d(num_classes, best_list, model, score_list_val, name_list_val, eval_list, path_trained_model, path_seg_results, palette, model_name):
 
     if num_classes == 2:
