@@ -129,10 +129,13 @@ async function copyText(value) {
   if (!copied) throw new Error("Copy is not available in this browser.");
 }
 
-export function EvaluationResultTabs({ summary, className = "" }) {
+export function EvaluationResultTabs({ summary, checkpointPaths = [], className = "" }) {
   const [activeTab, setActiveTab] = useState("average");
   const [copyState, setCopyState] = useState("idle");
   const results = summary?.results || [];
+  const expectedCheckpoints = checkpointPaths.length
+    ? checkpointPaths
+    : results.map((result) => result.checkpoint);
   const tabs = [
     {
       id: "average",
@@ -140,18 +143,23 @@ export function EvaluationResultTabs({ summary, className = "" }) {
       metrics: summary?.average_metrics,
       jaccard: summary?.average_jaccard,
       losses: summary?.average_validation_losses,
+      pending: results.length === 0,
     },
-    ...results.map((result, index) => ({
-      id: `checkpoint-${index}`,
-      label: `Checkpoint ${index + 1}`,
-      checkpoint: result.checkpoint,
-      metrics: result.metrics,
-      jaccard: result.jaccard,
-      losses: {
-        validation_loss_branch_1: result.validation_loss_branch_1,
-        validation_loss_branch_2: result.validation_loss_branch_2,
-      },
-    })),
+    ...expectedCheckpoints.map((checkpoint, index) => {
+      const result = results[index];
+      return {
+        id: `checkpoint-${index}`,
+        label: `Checkpoint ${index + 1}`,
+        checkpoint: result?.checkpoint || checkpoint,
+        metrics: result?.metrics,
+        jaccard: result?.jaccard,
+        pending: !result,
+        losses: result ? {
+          validation_loss_branch_1: result.validation_loss_branch_1,
+          validation_loss_branch_2: result.validation_loss_branch_2,
+        } : undefined,
+      };
+    }),
   ];
   const selected = tabs.find((tab) => tab.id === activeTab) || tabs[0];
   const handleCopy = async () => {
@@ -191,12 +199,11 @@ export function EvaluationResultTabs({ summary, className = "" }) {
         <div className="evaluation-result-panel-heading">
           <strong>{selected.label}</strong>
           {selected.checkpoint && <code title={selected.checkpoint}>{selected.checkpoint}</code>}
-          <button type="button" className="evaluation-table-copy-button" onClick={handleCopy}>
-            {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy table"}
+          <button type="button" className="evaluation-table-copy-button" onClick={handleCopy} disabled={selected.pending} title={selected.pending ? "Results are not available yet" : "Copy this result table"}>
+            {selected.pending ? "Results pending" : copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy table"}
           </button>
         </div>
-        <MetricResultsTable metrics={selected.metrics} jaccard={selected.jaccard} />
-        <LossResultsTable losses={selected.losses} />
+        {selected.pending ? <div className="evaluation-result-pending">Results for this checkpoint will appear after inference completes.</div> : <><MetricResultsTable metrics={selected.metrics} jaccard={selected.jaccard} /><LossResultsTable losses={selected.losses} /></>}
       </div>
     </section>
   );
