@@ -146,6 +146,7 @@ class ViewerServer:
             test_lists[0] if test_lists else None,
         )
         return {
+            "project_root": str(PROJECT_ROOT),
             "checkpoints": checkpoints,
             "checkpoint_groups": groups,
             "test_lists": [option(path) for path in test_lists],

@@ -2,23 +2,36 @@
 #PBS -N hff_eval_gpu
 #PBS -q workq
 # Evaluation uses one GPU and a small number of loader workers.
-#PBS -l select=1:ncpus=12:mem=64gb:ngpus=1
+#PBS -l select=1:ncpus=12:mem=32gb:ngpus=1
 #PBS -l walltime=48:00:00
 #PBS -j oe
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${HFF_REPO_ROOT:-${PBS_O_WORKDIR:-}}"
+if [[ -z "$REPO_ROOT" || ! -f "$REPO_ROOT/cross_eval.py" ]]; then
+  REPO_ROOT="$SCRIPT_REPO_ROOT"
+fi
+if [[ ! -f "$REPO_ROOT/cross_eval.py" ]]; then
+  echo "Error: HFF repository root could not be found. Set HFF_REPO_ROOT or submit from the repository root." >&2
+  exit 1
+fi
 cd "$REPO_ROOT"
 
 PYTHON_BIN="${HFF_PYTHON:-python}"
 GPU_DEVICE="${HFF_GPU_DEVICE:-}"
+RESOURCE_MONITOR_INTERVAL="${HFF_RESOURCE_MONITOR_INTERVAL:-5}"
+PBS_EVAL_JOB_ID="${PBS_JOBID:-eval_$(date -u +%Y%m%dT%H%M%SZ)_$$}"
+PBS_EVAL_JOB_ID="${PBS_EVAL_JOB_ID//[^a-zA-Z0-9_.-]/_}"
+PBS_EVAL_JOB_NAME="${HFF_EVAL_NAME:-${PBS_JOBNAME:-hff_eval_gpu}}"
 
 usage() {
   cat <<'USAGE'
 Usage:
-  qsub -v HFF_GPU_DEVICE=<device> -- scripts/submit_eval_gpu.pbs \
+  qsub -v HFF_GPU_DEVICE=<device>,HFF_CONDA_BASE=<conda-base> -- \
+    /absolute/path/to/scripts/submit_eval_gpu.pbs \
     --checkpoint_list <path> --test_list <path> --dataset_name <name> \
     --class_type all --output_dir <path> [cross_eval.py options]
 
@@ -26,7 +39,12 @@ The device may be a physical GPU index or the allocated MIG UUID. It is
 exposed to cross_eval.py through CUDA_VISIBLE_DEVICES, where it becomes
 logical cuda:0.
 
-The arguments after the PBS wrapper options are passed to cross_eval.py.
+The arguments after the PBS wrapper options are passed to cross_eval.py. The
+wrapper also writes validation_job_<PBS job id>.json and process-scoped
+resource telemetry beside --output_dir so the web Validation monitor can
+discover this PBS job.
+HFF_CONDA_BASE should point to the Conda installation containing the hffnet
+environment. HFF_CONDA_SH may be supplied instead when conda.sh is elsewhere.
 USAGE
 }
 
@@ -66,15 +84,20 @@ fi
 
 CONDA_ENV="${HFF_CONDA_ENV:-hffnet}"
 if [[ -n "$CONDA_ENV" ]]; then
+  CONDA_BASE="${HFF_CONDA_BASE:-}"
+  if [[ -z "$CONDA_BASE" && -f "/apps/compilers/anaconda3/etc/profile.d/conda.sh" ]]; then
+    CONDA_BASE="/apps/compilers/anaconda3"
+  fi
   CONDA_SH="${HFF_CONDA_SH:-}"
-  if [[ -z "$CONDA_SH" && -n "${HFF_CONDA_BASE:-}" ]]; then
-    CONDA_SH="$HFF_CONDA_BASE/etc/profile.d/conda.sh"
+  if [[ -z "$CONDA_SH" && -n "$CONDA_BASE" ]]; then
+    CONDA_SH="$CONDA_BASE/etc/profile.d/conda.sh"
   fi
   if [[ -z "$CONDA_SH" ]] && command -v conda >/dev/null 2>&1; then
     CONDA_SH="$(conda info --base)/etc/profile.d/conda.sh"
   fi
   if [[ -z "$CONDA_SH" || ! -f "$CONDA_SH" ]]; then
     echo "Error: Conda is not initialized in PBS. Set HFF_CONDA_BASE or HFF_CONDA_SH." >&2
+    echo "Expected Conda base: /apps/compilers/anaconda3 (or your cluster Conda installation)." >&2
     exit 1
   fi
   # shellcheck disable=SC1090
@@ -91,6 +114,12 @@ echo "PBS job ID: ${PBS_JOBID:-not set}"
 echo "Repository: $REPO_ROOT"
 echo "Selected device: $GPU_DEVICE"
 echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+echo "Conda environment: $CONDA_ENV"
 
-"$PYTHON_BIN" cross_eval.py "$@"
+"$PYTHON_BIN" "$REPO_ROOT/scripts/run_eval_with_monitor.py" \
+  --repo-root "$REPO_ROOT" \
+  --job-id "$PBS_EVAL_JOB_ID" \
+  --job-name "$PBS_EVAL_JOB_NAME" \
+  --resource-monitor-interval "$RESOURCE_MONITOR_INTERVAL" \
+  -- "$@"
 echo "[$(date)] HFF-Net evaluation complete"

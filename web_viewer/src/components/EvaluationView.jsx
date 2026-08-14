@@ -9,6 +9,38 @@ import { Badge, Button, Card, CardContent, CardHeader, CardTitle } from "./water
 import { EvaluationResultTabs } from "./EvaluationResultTables.jsx";
 
 const POLL_INTERVAL_MS = 3000;
+const EVALUATION_CONFIGURATION_KEY = "hff-net:evaluation-configuration:v1";
+
+function readSavedEvaluationConfiguration() {
+  const defaults = {
+    selectedRunName: "",
+    selectedFoldName: "all",
+    showLastSave: false,
+    selectedCheckpoints: [],
+    testList: "",
+    datasetName: "brats19",
+    evaluationName: "",
+    outputDir: "",
+    gpuDevice: "",
+    condaBase: "/apps/compilers/anaconda3",
+    condaEnv: "hffnet",
+    savedAt: "",
+  };
+  if (typeof window === "undefined") return defaults;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(EVALUATION_CONFIGURATION_KEY) || "null");
+    if (!saved || typeof saved !== "object") return defaults;
+    return {
+      ...defaults,
+      ...saved,
+      selectedCheckpoints: Array.isArray(saved.selectedCheckpoints)
+        ? saved.selectedCheckpoints.filter((path) => typeof path === "string")
+        : defaults.selectedCheckpoints,
+    };
+  } catch {
+    return defaults;
+  }
+}
 
 function formatTime(value) {
   if (!value) return "—";
@@ -52,6 +84,11 @@ function checkpointListPath(outputDir, evaluationName) {
   return `${trimTrailingSlashes(outputDir)}/checkpoint_list_eval_${suffix}.txt`;
 }
 
+function evaluationJobName(evaluationName) {
+  const name = evaluationName.trim().replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^\.+/, "");
+  return `hff_eval_${(name || "manual").slice(0, 40)}`;
+}
+
 function buildCheckpointListPreparation(outputDir, listPath, checkpoints) {
   return [
     `mkdir -p ${shellQuote(outputDir)}`,
@@ -74,6 +111,10 @@ function buildEvaluationArguments({ listPath, testList, datasetName, outputDir, 
 
 function CommandBox({ title, description, command, note }) {
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    setCopied(false);
+  }, [command]);
 
   const handleCopy = async () => {
     try {
@@ -193,15 +234,20 @@ function JobCard({ job, onRenamed }) {
 }
 
 export default function EvaluationView() {
+  const [initialConfiguration] = useState(readSavedEvaluationConfiguration);
   const [options, setOptions] = useState({ checkpoints: [], checkpoint_groups: [], test_lists: [], defaults: {} });
-  const [selectedRunName, setSelectedRunName] = useState("");
-  const [selectedFoldName, setSelectedFoldName] = useState("all");
-  const [showLastSave, setShowLastSave] = useState(false);
-  const [selectedCheckpoints, setSelectedCheckpoints] = useState([]);
-  const [testList, setTestList] = useState("");
-  const [datasetName, setDatasetName] = useState("brats19");
-  const [evaluationName, setEvaluationName] = useState("");
-  const [outputDir, setOutputDir] = useState("");
+  const [selectedRunName, setSelectedRunName] = useState(initialConfiguration.selectedRunName);
+  const [selectedFoldName, setSelectedFoldName] = useState(initialConfiguration.selectedFoldName);
+  const [showLastSave, setShowLastSave] = useState(initialConfiguration.showLastSave);
+  const [selectedCheckpoints, setSelectedCheckpoints] = useState(initialConfiguration.selectedCheckpoints);
+  const [testList, setTestList] = useState(initialConfiguration.testList);
+  const [datasetName, setDatasetName] = useState(initialConfiguration.datasetName);
+  const [evaluationName, setEvaluationName] = useState(initialConfiguration.evaluationName);
+  const [outputDir, setOutputDir] = useState(initialConfiguration.outputDir);
+  const [gpuDevice, setGpuDevice] = useState(initialConfiguration.gpuDevice);
+  const [condaBase, setCondaBase] = useState(initialConfiguration.condaBase);
+  const [condaEnv, setCondaEnv] = useState(initialConfiguration.condaEnv);
+  const [configurationSavedAt, setConfigurationSavedAt] = useState(initialConfiguration.savedAt);
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -260,6 +306,17 @@ export default function EvaluationView() {
   const commandPaths = useMemo(() => {
     const listPath = checkpointListPath(outputDir || "result/cross_eval", evaluationName);
     const progressPath = `${trimTrailingSlashes(outputDir || "result/cross_eval")}/cross_eval_progress_manual.json`;
+    const projectRoot = trimTrailingSlashes(options.project_root || ".");
+    const pbsScript = `${projectRoot}/scripts/submit_eval_gpu.pbs`;
+    const qsubEnvironment = [
+      `HFF_CONDA_BASE=${condaBase.trim() || "/apps/compilers/anaconda3"}`,
+      `HFF_GPU_DEVICE=${gpuDevice.trim() || "REPLACE_WITH_MIG_UUID"}`,
+      "WANDB_MODE=offline",
+      `HFF_CONDA_ENV=${condaEnv.trim() || "hffnet"}`,
+      `HFF_EVAL_NAME=${evaluationJobName(evaluationName)}`,
+      "HFF_RESOURCE_MONITOR_INTERVAL=5",
+      `HFF_REPO_ROOT=${projectRoot}`,
+    ].join(",");
     const preparation = commandsReady
       ? buildCheckpointListPreparation(outputDir.trim(), listPath, selectedCheckpoints)
       : "";
@@ -274,9 +331,9 @@ export default function EvaluationView() {
       : "";
     return {
       direct: preparation ? `${preparation} && \\\npython cross_eval.py \\\n  ${argumentsBlock}` : "",
-      pbs: preparation ? `${preparation} && \\\nqsub -v HFF_GPU_DEVICE=REPLACE_WITH_MIG_UUID -- scripts/submit_eval_gpu.pbs \\\n  ${argumentsBlock}` : "",
+      pbs: preparation ? `${preparation} && \\\nqsub \\\n  -q workq \\\n  -N ${shellQuote(evaluationJobName(evaluationName))} \\\n  -l select=1:ncpus=12:mem=32gb:ngpus=1 \\\n  -l walltime=48:00:00 \\\n  -j oe \\\n  -v ${shellQuote(qsubEnvironment)} \\\n  -- \\\n  ${shellQuote(pbsScript)} \\\n  ${argumentsBlock}` : "",
     };
-  }, [commandsReady, datasetName, evaluationName, outputDir, selectedCheckpoints, testList]);
+  }, [commandsReady, condaBase, condaEnv, datasetName, evaluationName, gpuDevice, options.project_root, outputDir, selectedCheckpoints, testList]);
 
   const handleRunChange = (event) => {
     setSelectedRunName(event.target.value);
@@ -299,6 +356,31 @@ export default function EvaluationView() {
       setError("");
     } catch (refreshError) {
       setError(refreshError.message);
+    }
+  };
+
+  const handleSaveConfiguration = () => {
+    const savedAt = new Date().toISOString();
+    const configuration = {
+      selectedRunName,
+      selectedFoldName,
+      showLastSave,
+      selectedCheckpoints,
+      testList: testList.trim(),
+      datasetName,
+      evaluationName: evaluationName.trim(),
+      outputDir: outputDir.trim(),
+      gpuDevice: gpuDevice.trim(),
+      condaBase: condaBase.trim(),
+      condaEnv: condaEnv.trim(),
+      savedAt,
+    };
+    try {
+      window.localStorage.setItem(EVALUATION_CONFIGURATION_KEY, JSON.stringify(configuration));
+      setConfigurationSavedAt(savedAt);
+      setError("");
+    } catch (saveError) {
+      setError(`Could not save the evaluation configuration locally: ${saveError.message}`);
     }
   };
 
@@ -326,7 +408,10 @@ export default function EvaluationView() {
               <div className="evaluation-field"><label htmlFor="test-list">Test list</label><select id="test-list" value={testList} onChange={(event) => setTestList(event.target.value)}><option value="">Select a discovered test list</option>{(options.test_lists || []).map((item) => <option key={item.path} value={item.path}>{item.label}</option>)}</select><input aria-label="Custom test list path" value={testList} onChange={(event) => setTestList(event.target.value)} placeholder="Or enter an absolute/custom test-list path" /></div>
               <div className="evaluation-field-row"><div className="evaluation-field"><label htmlFor="dataset-name">Dataset</label><select id="dataset-name" value={datasetName} onChange={(event) => setDatasetName(event.target.value)}><option value="brats19">BraTS 2019</option><option value="brats20">BraTS 2020</option><option value="brats23men">BraTS 2023 meningioma</option><option value="msdbts">MSD BraTS</option></select></div><div className="evaluation-field"><label htmlFor="class-type">Labels</label><input id="class-type" value="All labels" readOnly aria-describedby="class-type-note" /><small id="class-type-note">HFF-Net checkpoints are evaluated with all trained classes.</small></div></div>
               <div className="evaluation-field"><label htmlFor="output-dir">Output directory</label><input id="output-dir" value={outputDir} onChange={(event) => setOutputDir(event.target.value)} placeholder="result/cross_eval" /><small>Relative paths are resolved from the HFF project root.</small></div>
-              <div className="evaluation-command-section"><div className="evaluation-command-section-heading"><h2>Run commands</h2><p>Run these from the HFF repository root. Neither box starts a job from the viewer.</p></div><CommandBox title="1. Direct command" description="Runs cross_eval.py in the current shell." command={commandPaths.direct} /><CommandBox title="2. PBS / workq command" description="Submits one GPU job to the institute PBS workq queue." command={commandPaths.pbs} note="Replace REPLACE_WITH_MIG_UUID with the allocated value from nvidia-smi -L before submitting." /></div>
+              <div className="evaluation-field"><label htmlFor="gpu-device">GPU / MIG device <span>Required for PBS</span></label><input id="gpu-device" value={gpuDevice} onChange={(event) => setGpuDevice(event.target.value)} placeholder="e.g. MIG-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx or 0" autoComplete="off" /><small>Use one GPU index or MIG UUID from <code>nvidia-smi -L</code>. This value is used by the PBS command.</small></div>
+              <div className="evaluation-field-row"><div className="evaluation-field"><label htmlFor="conda-base">Conda base <span>PBS</span></label><input id="conda-base" value={condaBase} onChange={(event) => setCondaBase(event.target.value)} placeholder="/apps/compilers/anaconda3" /><small>Passed as <code>HFF_CONDA_BASE</code>.</small></div><div className="evaluation-field"><label htmlFor="conda-env">Conda environment</label><input id="conda-env" value={condaEnv} onChange={(event) => setCondaEnv(event.target.value)} placeholder="hffnet" /><small>Passed as <code>HFF_CONDA_ENV</code>.</small></div></div>
+              <div className="evaluation-configuration-actions"><Button type="button" className="evaluation-save-configuration" onClick={handleSaveConfiguration}>Save configuration</Button><span>{configurationSavedAt ? `Saved locally ${formatTime(configurationSavedAt)}` : "Configuration not saved yet"}</span></div>
+              <div className="evaluation-command-section"><div className="evaluation-command-section-heading"><h2>Run commands</h2><p>Run these from the HFF repository root. Neither box starts a job from the viewer.</p></div><CommandBox title="1. Direct command" description="Runs cross_eval.py in the current shell." command={commandPaths.direct} /><CommandBox title="2. PBS / workq command" description="Submits one GPU job to workq with explicit GPU and Conda settings." command={commandPaths.pbs} note={gpuDevice.trim() ? "The command uses the GPU / MIG device and Conda base entered above." : "Enter a GPU / MIG device above; the command currently contains a placeholder."} /></div>
             </CardContent>
           </Card>
         </div>

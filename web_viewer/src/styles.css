@@ -124,6 +124,9 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .evaluation-field input, .evaluation-field select { width: 100%; min-height: 37px; padding: 0 10px; border: 1px solid #2b4253; border-radius: 6px; outline: none; color: #dfeaf0; background: #080f16; font-size: 11px; }
 .evaluation-field input:focus, .evaluation-field select:focus { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(0, 112, 243, 0.15); }
 .evaluation-field small { color: #7e919e; font-size: 9px; }
+.evaluation-configuration-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 17px; }
+.evaluation-save-configuration { min-height: 34px; padding: 0 12px; border-color: transparent; font-size: 10px; }
+.evaluation-configuration-actions > span { color: #7e919e; font-size: 9px; }
 .evaluation-checkpoint-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #7e919e; font-size: 9px; }
 .evaluation-fold-filter { display: inline-flex !important; align-items: center; justify-content: flex-start !important; gap: 6px !important; color: #b4c5ce !important; white-space: nowrap; }
 .evaluation-fold-filter > span { color: #7e919e !important; font-size: 9px; font-weight: 600; }
