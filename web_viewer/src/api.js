@@ -84,3 +84,7 @@ export async function fetchValidationRuns() {
 export async function fetchValidationRun(runId) {
   return fetchJson(`/validation/runs/${encodeURIComponent(runId)}`);
 }
+
+export async function deleteValidationRun(runId) {
+  return fetchJson(`/validation/runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
+}

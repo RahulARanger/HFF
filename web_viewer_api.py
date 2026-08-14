@@ -70,6 +70,7 @@ class ViewerServer:
     def __init__(self, results_root: Path) -> None:
         self.results_root = self._resolve_project_path(results_root)
         self.eval_jobs: dict[str, dict[str, object]] = {}
+        self.deleted_validation_runs: set[str] = set()
         self.eval_lock = threading.Lock()
         self.active_eval_job: str | None = None
 
@@ -447,7 +448,10 @@ class ViewerServer:
         sources: dict[str, tuple[Path, dict[str, object]]] = {}
         with self.eval_lock:
             jobs = {job_id: dict(job) for job_id, job in self.eval_jobs.items()}
+            deleted_runs = set(self.deleted_validation_runs)
         for job_id, job in jobs.items():
+            if job_id in deleted_runs:
+                continue
             log_path = job.get("resource_log") or job.get("log_file")
             if isinstance(log_path, str):
                 sources[job_id] = (Path(log_path), job)
@@ -457,10 +461,68 @@ class ViewerServer:
                 payload = read_json(manifest_path)
                 job_id = payload.get("id")
                 log_path = payload.get("resource_log") or payload.get("log_file")
-                if isinstance(job_id, str) and isinstance(log_path, str) and job_id not in sources:
+                if (
+                    isinstance(job_id, str)
+                    and job_id not in deleted_runs
+                    and isinstance(log_path, str)
+                    and job_id not in sources
+                ):
                     payload["manifest_file"] = str(manifest_path)
                     sources[job_id] = (Path(log_path), payload)
         return sources
+
+    def delete_validation_run(self, run_id: str) -> dict[str, object]:
+        """Delete monitor telemetry for a finished validation without touching results."""
+        source = self.validation_sources().get(run_id)
+        if source is None:
+            raise KeyError(run_id)
+        log_path, job = source
+        if job.get("status") in {"queued", "running"}:
+            raise RuntimeError("Stop the running evaluation before deleting its validation telemetry.")
+
+        artifact_paths: list[Path] = []
+        manifest_value = job.get("manifest_file")
+        if isinstance(manifest_value, str):
+            artifact_paths.append(Path(manifest_value))
+        resource_log_value = job.get("resource_log")
+        if isinstance(resource_log_value, str):
+            artifact_paths.append(Path(resource_log_value))
+        if log_path.name.endswith(MONITOR_LOG_SUFFIX):
+            artifact_paths.append(log_path)
+            artifact_paths.append(
+                log_path.with_name(log_path.name.replace(MONITOR_LOG_SUFFIX, MONITOR_SUMMARY_SUFFIX))
+            )
+        summary_value = job.get("resource_summary_file")
+        if isinstance(summary_value, str):
+            artifact_paths.append(Path(summary_value))
+
+        unique_paths: list[Path] = []
+        seen_paths: set[Path] = set()
+        for path in artifact_paths:
+            resolved_path = path.expanduser().resolve()
+            if resolved_path in seen_paths:
+                continue
+            seen_paths.add(resolved_path)
+            if self.results_root not in resolved_path.parents:
+                continue
+            if not (
+                resolved_path.name == f"validation_job_{run_id}.json"
+                or resolved_path.name.endswith(MONITOR_LOG_SUFFIX)
+                or resolved_path.name.endswith(MONITOR_SUMMARY_SUFFIX)
+            ):
+                continue
+            unique_paths.append(resolved_path)
+
+        for path in unique_paths:
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                raise
+
+        with self.eval_lock:
+            self.deleted_validation_runs.add(run_id)
+        return {"id": run_id, "deleted": True}
 
 def read_jsonl_tail(path: Path, limit: int) -> list[dict[str, object]]:
     """Read only the newest monitor samples so polling stays cheap for long runs."""
@@ -834,6 +896,17 @@ def create_app(results_root: Path = DEFAULT_RESULTS_ROOT) -> FastAPI:
             raise HTTPException(status_code=404, detail="Unknown validation run.")
         log_path, job = source
         return state._validation_record(run_id, log_path, job, include_samples=True)
+
+    @app.delete("/api/validation/runs/{run_id}")
+    def delete_validation_run(run_id: str) -> dict[str, object]:
+        try:
+            return state.delete_validation_run(run_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown validation run.") from None
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not delete validation telemetry: {exc}") from None
 
     @app.get("/api/monitor/runs")
     def monitor_runs() -> dict[str, object]:
