@@ -147,6 +147,7 @@ class ViewerServer:
         )
         return {
             "project_root": str(PROJECT_ROOT),
+            "pbs_script": str(PROJECT_ROOT / "scripts" / "submit_eval_gpu.pbs"),
             "checkpoints": checkpoints,
             "checkpoint_groups": groups,
             "test_lists": [option(path) for path in test_lists],
@@ -460,6 +461,10 @@ class ViewerServer:
         evaluation_summary_value = job.get("summary_file")
         if isinstance(evaluation_summary_value, str):
             evaluation_summary = read_json(Path(evaluation_summary_value))
+        progress = {}
+        progress_value = job.get("progress_file")
+        if isinstance(progress_value, str):
+            progress = read_json(Path(progress_value))
         persisted_status = job.get("status")
         status = str(persisted_status or ("completed" if summary else "stale"))
         started_at = job.get("started_at") or summary.get("started_at_utc") or (
@@ -507,6 +512,7 @@ class ViewerServer:
             "summary_file": str(summary_path) if summary_path.is_file() else None,
             "manifest_file": job.get("manifest_file"),
             "request": request,
+            "progress": progress,
             "evaluation_summary": evaluation_summary,
             "latest": latest,
             "peak": {

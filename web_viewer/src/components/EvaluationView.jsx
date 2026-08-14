@@ -78,6 +78,13 @@ function trimTrailingSlashes(value) {
   return String(value).replace(/\/+$/, "");
 }
 
+function inferProjectRootFromOutputDir(outputDir) {
+  const normalized = trimTrailingSlashes(outputDir);
+  const resultMarker = "/result/";
+  const markerIndex = normalized.indexOf(resultMarker);
+  return markerIndex > 0 ? normalized.slice(0, markerIndex) : "";
+}
+
 function checkpointListPath(outputDir, evaluationName) {
   const name = evaluationName.trim().replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^\.+/, "");
   const suffix = name || "manual";
@@ -306,8 +313,14 @@ export default function EvaluationView() {
   const commandPaths = useMemo(() => {
     const listPath = checkpointListPath(outputDir || "result/cross_eval", evaluationName);
     const progressPath = `${trimTrailingSlashes(outputDir || "result/cross_eval")}/cross_eval_progress_manual.json`;
-    const projectRoot = trimTrailingSlashes(options.project_root || ".");
-    const pbsScript = `${projectRoot}/scripts/submit_eval_gpu.pbs`;
+    const configuredProjectRoot = String(options.project_root || "").trim();
+    const hasUsableAbsoluteProjectRoot = configuredProjectRoot.startsWith("/") && configuredProjectRoot !== "/";
+    const projectRoot = hasUsableAbsoluteProjectRoot
+      ? trimTrailingSlashes(configuredProjectRoot)
+      : inferProjectRootFromOutputDir(outputDir);
+    const pbsScript = projectRoot
+      ? `${projectRoot}/scripts/submit_eval_gpu.pbs`
+      : (options.pbs_script || "scripts/submit_eval_gpu.pbs");
     const qsubEnvironment = [
       `HFF_CONDA_BASE=${condaBase.trim() || "/apps/compilers/anaconda3"}`,
       `HFF_GPU_DEVICE=${gpuDevice.trim() || "REPLACE_WITH_MIG_UUID"}`,
@@ -315,7 +328,7 @@ export default function EvaluationView() {
       `HFF_CONDA_ENV=${condaEnv.trim() || "hffnet"}`,
       `HFF_EVAL_NAME=${evaluationJobName(evaluationName)}`,
       "HFF_RESOURCE_MONITOR_INTERVAL=5",
-      `HFF_REPO_ROOT=${projectRoot}`,
+      "HFF_REPO_ROOT=.",
     ].join(",");
     const preparation = commandsReady
       ? buildCheckpointListPreparation(outputDir.trim(), listPath, selectedCheckpoints)

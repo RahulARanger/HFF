@@ -239,6 +239,12 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .evaluation-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; min-height: 150px; padding: 22px; border: 1px dashed #2b4253; color: #7e919e; background: #050a0e; font-size: 11px; text-align: center; }
 .evaluation-empty strong { color: #d6e2e8; font-size: 13px; }
 .validation-intro { max-width: 1500px; margin: -10px auto 18px; color: #9aaab5; font-size: 13px; line-height: 1.5; }
+.evaluation-sample-progress { margin-top: 14px; padding: 13px 15px 11px; border: 1px solid var(--line); border-radius: 3px; background: #050a0e; }
+.evaluation-sample-progress-header, .evaluation-sample-progress-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #9aaab5; font-size: 11px; font-variant-numeric: tabular-nums; }
+.evaluation-sample-progress-header strong { color: #f0f5f7; font-size: 12px; }
+.evaluation-sample-progress-track { height: 10px; margin-top: 9px; overflow: hidden; border-radius: 2px; background: #26333e; }
+.evaluation-sample-progress-track span { display: block; height: 100%; background: linear-gradient(90deg, #0070f3, #50e3c2); transition: width 220ms ease; }
+.evaluation-sample-progress-meta { margin-top: 6px; color: #738692; font-size: 10px; }
 .validation-page .monitor-metrics-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .validation-page .monitor-metric-card { min-height: 108px; }
 .validation-page .monitor-metric-value { font-size: 17px; }

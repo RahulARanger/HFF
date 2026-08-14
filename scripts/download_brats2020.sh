@@ -62,6 +62,22 @@ echo "Extracting archive: $ZIP_FILE"
 rm -rf "$EXTRACT_DIR"/*
 unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
 
+# The Kaggle mirror contains one legacy BraTS 2020 label filename. Normalize
+# it immediately so downstream split generation and loaders see the standard
+# ``<subject>_seg.nii`` convention used by the repository.
+while IFS= read -r -d '' subject_dir; do
+  legacy_label="$subject_dir/W39_1998.09.19_Segm.nii"
+  normalized_label="$subject_dir/BraTS20_Training_355_seg.nii"
+  if [[ -f "$legacy_label" ]]; then
+    if [[ -e "$normalized_label" ]]; then
+      echo "Error: both legacy and normalized labels exist in $subject_dir." >&2
+      exit 1
+    fi
+    mv -- "$legacy_label" "$normalized_label"
+    echo "Normalized legacy label: $normalized_label"
+  fi
+done < <(find "$EXTRACT_DIR" -type d -name 'BraTS20_Training_355' -print0)
+
 echo "Full extracted dataset written to: $EXTRACT_DIR"
 
 echo "Done."
