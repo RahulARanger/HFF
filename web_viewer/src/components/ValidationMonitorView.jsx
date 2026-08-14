@@ -82,18 +82,31 @@ const RESOURCE_SERIES = [
   { field: "gpu_utilization_percent", color: "#f17c86", label: "GPU util", format: (value) => `${Number(value).toFixed(1)}%` },
 ];
 
+function nearestPoint(event, count) {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const ratio = Math.min(Math.max((event.clientX - bounds.left) / bounds.width, 0), 1);
+  return Math.round(ratio * Math.max(count - 1, 0));
+}
+
 function ResourceLane({ item, samples }) {
   const values = samples.map((sample) => Number(sample[item.field])).filter(Number.isFinite);
+  const [hoveredIndex, setHoveredIndex] = useState(null);
   if (!values.length) return <div className="resource-lane resource-lane-empty"><div className="resource-lane-header"><span className="resource-lane-label"><i style={{ background: item.color }} />{item.label}</span><span>Unavailable</span></div></div>;
   const maximum = Math.max(...values, 1);
-  const points = samples.map((sample, index) => {
+  const pointFor = (sample, index) => {
     const value = Number(sample[item.field]);
     if (!Number.isFinite(value)) return null;
     const x = samples.length === 1 ? 50 : (index / (samples.length - 1)) * 100;
-    return `${x},${90 - (value / maximum) * 72}`;
-  }).filter(Boolean).join(" ");
+    return { x, y: 90 - (value / maximum) * 72 };
+  };
+  const points = samples.map((sample, index) => pointFor(sample, index)).filter(Boolean).map(({ x, y }) => `${x},${y}`).join(" ");
   const latest = [...samples].reverse().map((sample) => Number(sample[item.field])).find(Number.isFinite);
-  return <div className="resource-lane"><div className="resource-lane-header"><span className="resource-lane-label"><i style={{ background: item.color }} />{item.label}</span><span>{item.format(latest)} · peak {item.format(maximum)}</span></div><div className="resource-lane-plot"><div className="resource-lane-axis"><span>{item.format(maximum)}</span><span>{item.format === formatBytes ? "0 B" : "0%"}</span></div><svg className="resource-lane-svg" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${item.label} over time`}><line x1="0" y1="90" x2="100" y2="90" stroke="rgba(128, 155, 173, 0.18)" strokeWidth="1" /><polyline points={points} fill="none" stroke={item.color} strokeWidth="2.4" vectorEffect="non-scaling-stroke" /></svg></div></div>;
+  const lastIndex = samples.map((sample) => Number(sample[item.field])).reduce((last, value, index) => Number.isFinite(value) ? index : last, -1);
+  const lastPoint = lastIndex >= 0 ? pointFor(samples[lastIndex], lastIndex) : null;
+  const hoveredSample = hoveredIndex === null ? null : samples[hoveredIndex];
+  const hoveredValue = hoveredSample ? Number(hoveredSample[item.field]) : null;
+  const hoveredPoint = hoveredSample ? pointFor(hoveredSample, hoveredIndex) : null;
+  return <div className="resource-lane"><div className="resource-lane-header"><span className="resource-lane-label"><i style={{ background: item.color }} />{item.label}</span><span>{item.format(latest)} · peak {item.format(maximum)}</span></div><div className="resource-lane-plot"><div className="resource-lane-axis"><span>{item.format(maximum)}</span><span>{item.format === formatBytes ? "0 B" : "0%"}</span></div><svg className="resource-lane-svg" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${item.label} over time`} onMouseMove={(event) => setHoveredIndex(nearestPoint(event, samples.length))} onMouseLeave={() => setHoveredIndex(null)}><line x1="0" y1="90" x2="100" y2="90" stroke="rgba(128, 155, 173, 0.18)" strokeWidth="1" /><polyline points={points} fill="none" stroke={item.color} strokeWidth="2.4" vectorEffect="non-scaling-stroke" />{lastPoint && <circle cx={lastPoint.x} cy={lastPoint.y} r="2.6" fill={item.color} vectorEffect="non-scaling-stroke" />}{hoveredPoint && <line x1={hoveredPoint.x} y1="10" x2={hoveredPoint.x} y2="92" stroke={item.color} strokeOpacity="0.55" strokeDasharray="2 2" vectorEffect="non-scaling-stroke" />}</svg>{hoveredSample && Number.isFinite(hoveredValue) && hoveredPoint && <div className="graph-tooltip resource-tooltip" style={{ left: `${hoveredPoint.x}%` }}><strong>{item.format(hoveredValue)}</strong><span>{formatClock(hoveredSample.timestamp_utc)}</span></div>}</div></div>;
 }
 
 function ResourceTimeline({ samples }) {

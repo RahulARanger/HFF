@@ -460,7 +460,22 @@ class ViewerServer:
         evaluation_summary = {}
         evaluation_summary_value = job.get("summary_file")
         if isinstance(evaluation_summary_value, str):
-            evaluation_summary = read_json(Path(evaluation_summary_value))
+            evaluation_summary_path = Path(evaluation_summary_value)
+            evaluation_summary = read_json(evaluation_summary_path)
+            if not evaluation_summary.get("results"):
+                partial_results = []
+                partial_result_files = []
+                for result_path in sorted(evaluation_summary_path.parent.glob("checkpoint_*.json")):
+                    result = read_json(result_path)
+                    if result:
+                        partial_results.append(result)
+                        partial_result_files.append(str(result_path))
+                if partial_results:
+                    evaluation_summary = {
+                        "result_files": partial_result_files,
+                        "results": partial_results,
+                        "checkpoint_count": len(partial_results),
+                    }
         progress = {}
         progress_value = job.get("progress_file")
         if isinstance(progress_value, str):

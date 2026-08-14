@@ -215,6 +215,20 @@ def checkpoint_result_path(output_dir: Path, index: int, checkpoint: Path) -> Pa
     return output_dir / f'checkpoint_{index:03d}_{safe_stem}.json'
 
 
+def build_summary(args: argparse.Namespace, checkpoint_list: Path, results: list[dict[str, Any]], result_files: list[str]) -> dict[str, Any]:
+    """Build the current summary so the monitor can expose completed checkpoints early."""
+    return {
+        'checkpoint_list': str(checkpoint_list),
+        'test_list': str(Path(args.test_list).expanduser().resolve()),
+        'dataset_name': args.dataset_name,
+        'class_type': args.class_type,
+        'result_files': result_files,
+        'results': results,
+        'partial': False,
+        **aggregate_results(results),
+    }
+
+
 def main() -> int:
     args = build_parser().parse_args()
     checkpoint_list = args.checkpoint_list.expanduser().resolve()
@@ -246,7 +260,7 @@ def main() -> int:
                 if isinstance(total_samples, int)
                 else 0
             )
-            write_progress(progress_file, {
+            progress_payload = {
                 'phase': 'inference',
                 'checkpoint_index': index,
                 'checkpoint_count': len(checkpoints),
@@ -255,7 +269,31 @@ def main() -> int:
                 'total_samples': total_samples,
                 'overall_processed_samples': overall_processed,
                 'overall_total_samples': overall_total,
-            })
+            }
+            if update.get('metrics') and update.get('jaccard'):
+                live_result = json_safe_result({
+                    'checkpoint': str(checkpoint),
+                    'test_list': str(Path(args.test_list).expanduser().resolve()),
+                    'dataset_name': args.dataset_name,
+                    'class_type': args.class_type,
+                    'num_samples': processed_samples,
+                    'validation_loss_branch_1': update.get('validation_loss_branch_1'),
+                    'validation_loss_branch_2': update.get('validation_loss_branch_2'),
+                    'metrics': update['metrics'],
+                    'jaccard': update['jaccard'],
+                    'partial': True,
+                })
+                progress_payload.update({
+                    'validation_loss_branch_1': live_result['validation_loss_branch_1'],
+                    'validation_loss_branch_2': live_result['validation_loss_branch_2'],
+                    'metrics': live_result['metrics'],
+                    'jaccard': live_result['jaccard'],
+                })
+                live_summary = build_summary(args, checkpoint_list, [*results, live_result], result_files)
+                live_summary['partial'] = True
+                live_summary['completed_checkpoint_count'] = len(results)
+                write_json(output_dir / 'cross_eval_summary.json', live_summary)
+            write_progress(progress_file, progress_payload)
 
         result = json_safe_result(
             evaluate_checkpoint(
@@ -269,6 +307,10 @@ def main() -> int:
         results.append(result)
         result_files.append(str(result_path))
         LOGGER.info('Saved checkpoint result to %s', result_path)
+        checkpoint_summary = build_summary(args, checkpoint_list, results, result_files)
+        checkpoint_summary['partial'] = index < len(checkpoints)
+        checkpoint_summary['completed_checkpoint_count'] = index
+        write_json(output_dir / 'cross_eval_summary.json', checkpoint_summary)
         write_progress(progress_file, {
             'phase': 'checkpoint_complete',
             'checkpoint_index': index,
@@ -280,15 +322,7 @@ def main() -> int:
             'overall_total_samples': len(checkpoints) * result.get('num_samples', 0),
         })
 
-    summary = {
-        'checkpoint_list': str(checkpoint_list),
-        'test_list': str(Path(args.test_list).expanduser().resolve()),
-        'dataset_name': args.dataset_name,
-        'class_type': args.class_type,
-        'result_files': result_files,
-        'results': results,
-        **aggregate_results(results),
-    }
+    summary = build_summary(args, checkpoint_list, results, result_files)
     summary_path = output_dir / 'cross_eval_summary.json'
     write_json(summary_path, summary)
     completed_samples = results[-1].get('num_samples', 0) if results else 0

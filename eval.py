@@ -208,9 +208,21 @@ def evaluate_checkpoint(args, checkpoint_path=None, device=None, progress_callba
 
             if progress_callback is not None:
                 batch_size = int(data[0].shape[0])
+                processed_samples = min((batch_index + 1) * batch_size, total_samples)
+                snapshot_1, snapshot_2, snapshot_jaccard_1, snapshot_jaccard_2 = validation_metrics.snapshot()
                 progress_callback({
-                    'processed_samples': min((batch_index + 1) * batch_size, total_samples),
+                    'processed_samples': processed_samples,
                     'total_samples': total_samples,
+                    'validation_loss_branch_1': val_loss_sup_1 / (batch_index + 1),
+                    'validation_loss_branch_2': val_loss_sup_2 / (batch_index + 1),
+                    'metrics': {
+                        'branch_1': list(snapshot_1),
+                        'branch_2': list(snapshot_2),
+                    },
+                    'jaccard': {
+                        'branch_1': list(snapshot_jaccard_1),
+                        'branch_2': list(snapshot_jaccard_2),
+                    },
                 })
 
     print_val_loss(val_loss_sup_1, val_loss_sup_2, {'val': num_batches}, 63, 0)

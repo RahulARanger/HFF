@@ -143,7 +143,7 @@ export function EvaluationResultTabs({ summary, checkpointPaths = [], className 
       metrics: summary?.average_metrics,
       jaccard: summary?.average_jaccard,
       losses: summary?.average_validation_losses,
-      pending: results.length === 0,
+      pending: summary?.partial || results.length === 0 || Object.keys(summary?.average_metrics || {}).length === 0,
     },
     ...expectedCheckpoints.map((checkpoint, index) => {
       const result = results[index];
@@ -154,6 +154,7 @@ export function EvaluationResultTabs({ summary, checkpointPaths = [], className 
         metrics: result?.metrics,
         jaccard: result?.jaccard,
         pending: !result,
+        live: Boolean(result?.partial),
         losses: result ? {
           validation_loss_branch_1: result.validation_loss_branch_1,
           validation_loss_branch_2: result.validation_loss_branch_2,
@@ -199,6 +200,7 @@ export function EvaluationResultTabs({ summary, checkpointPaths = [], className 
         <div className="evaluation-result-panel-heading">
           <strong>{selected.label}</strong>
           {selected.checkpoint && <code title={selected.checkpoint}>{selected.checkpoint}</code>}
+          {selected.live && <span className="evaluation-result-live">Updating</span>}
           <button type="button" className="evaluation-table-copy-button" onClick={handleCopy} disabled={selected.pending} title={selected.pending ? "Results are not available yet" : "Copy this result table"}>
             {selected.pending ? "Results pending" : copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy table"}
           </button>

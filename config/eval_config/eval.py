@@ -263,6 +263,17 @@ class StreamingValidationMetrics:
         self._sample_count = 0
 
     def _record_group(self, predictions_1, predictions_2, target):
+        metrics_1, metrics_2, jaccard_1, jaccard_2 = self._calculate_group_metrics(
+            predictions_1, predictions_2, target
+        )
+        group_samples = predictions_1.shape[0]
+        self._metric_sums[0] += metrics_1 * group_samples
+        self._metric_sums[1] += metrics_2 * group_samples
+        self._jaccard_sums[0] += jaccard_1 * group_samples
+        self._jaccard_sums[1] += jaccard_2 * group_samples
+        self._sample_count += group_samples
+
+    def _calculate_group_metrics(self, predictions_1, predictions_2, target):
         if self.num_classes == 2:
             metric_fn = evaluate_multi_binary_labels
             jaccard_fn = evaluate_multi_binary_jaccard_labels
@@ -274,12 +285,7 @@ class StreamingValidationMetrics:
         metrics_2 = np.asarray(metric_fn(predictions_2, target), dtype=float)
         jaccard_1 = np.asarray(jaccard_fn(predictions_1, target), dtype=float)
         jaccard_2 = np.asarray(jaccard_fn(predictions_2, target), dtype=float)
-        group_samples = predictions_1.shape[0]
-        self._metric_sums[0] += metrics_1 * group_samples
-        self._metric_sums[1] += metrics_2 * group_samples
-        self._jaccard_sums[0] += jaccard_1 * group_samples
-        self._jaccard_sums[1] += jaccard_2 * group_samples
-        self._sample_count += group_samples
+        return metrics_1, metrics_2, jaccard_1, jaccard_2
 
     def _flush_full_groups(self):
         while self._buffer_size >= self.group_size:
@@ -338,6 +344,32 @@ class StreamingValidationMetrics:
         self.compute()
         return tuple(self._jaccard_sums[0] / self._sample_count), tuple(
             self._jaccard_sums[1] / self._sample_count
+        )
+
+    def snapshot(self):
+        """Return current scores without flushing or changing the metric stream."""
+        metric_sums = [values.copy() for values in self._metric_sums]
+        jaccard_sums = [values.copy() for values in self._jaccard_sums]
+        sample_count = self._sample_count
+        if self._buffer_size:
+            predictions_1 = torch.cat(self._prediction_buffers[0], dim=0)
+            predictions_2 = torch.cat(self._prediction_buffers[1], dim=0)
+            target = torch.cat(self._target_buffer, dim=0)
+            metrics_1, metrics_2, jaccard_1, jaccard_2 = self._calculate_group_metrics(
+                predictions_1, predictions_2, target
+            )
+            sample_count += predictions_1.shape[0]
+            metric_sums[0] += metrics_1 * predictions_1.shape[0]
+            metric_sums[1] += metrics_2 * predictions_1.shape[0]
+            jaccard_sums[0] += jaccard_1 * predictions_1.shape[0]
+            jaccard_sums[1] += jaccard_2 * predictions_1.shape[0]
+        if sample_count == 0:
+            raise ValueError('Cannot snapshot validation metrics without samples.')
+        return (
+            tuple(metric_sums[0] / sample_count),
+            tuple(metric_sums[1] / sample_count),
+            tuple(jaccard_sums[0] / sample_count),
+            tuple(jaccard_sums[1] / sample_count),
         )
 
 # def evaluate_multi(y_scores, y_true):
