@@ -452,6 +452,13 @@ The model will be saved under ./result/checkpoints. The training takes about 1.5
 
 To evaluate a trained model, run ```./eval.py``` with the following arguments:
 
+The web viewer's evaluation page only generates commands; it does not launch
+inference directly. The first command box runs `cross_eval.py` in the current
+shell. The second submits the same command through
+`scripts/submit_eval_gpu.pbs`, which requests one GPU from the `workq` queue.
+Replace the GPU/MIG placeholder with a device listed by `nvidia-smi -L` before
+submitting the PBS command.
+
 ```--selected_modal```: list of input modalities (same as used during training)
 
 ```--dataset_name```: one of ['brats19', 'brats20', 'brats23men', 'msdbts']

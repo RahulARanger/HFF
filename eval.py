@@ -114,7 +114,7 @@ def build_parser():
     return parser
 
 
-def evaluate_checkpoint(args, checkpoint_path=None, device=None):
+def evaluate_checkpoint(args, checkpoint_path=None, device=None, progress_callback=None):
     """Run the existing evaluation loop for one checkpoint and return JSON-ready metrics.
 
     ``cross_eval.py`` calls this function once per checkpoint. Keeping the model
@@ -157,8 +157,15 @@ def evaluate_checkpoint(args, checkpoint_path=None, device=None):
     )
     val_loader = loaders['val']
     num_batches = len(val_loader)
+    total_samples = len(val_loader.dataset)
     if num_batches == 0:
         raise ValueError(f'Test list contains no evaluation samples: {test_list}')
+
+    if progress_callback is not None:
+        progress_callback({
+            'processed_samples': 0,
+            'total_samples': total_samples,
+        })
 
     val_loss_sup_1 = 0.0
     val_loss_sup_2 = 0.0
@@ -167,7 +174,7 @@ def evaluate_checkpoint(args, checkpoint_path=None, device=None):
     # preprocessing, branch outputs, or the StreamingValidationMetrics policy.
     validation_metrics = StreamingValidationMetrics(classnum, group_size=10)
     with torch.inference_mode():
-        for data in tqdm(val_loader, desc=f'Inference [{checkpoint_path.name}]'):
+        for batch_index, data in enumerate(tqdm(val_loader, desc=f'Inference [{checkpoint_path.name}]')):
             low_freq_inputs = []
             high_freq_inputs = []
             for j in range(20):
@@ -199,6 +206,13 @@ def evaluate_checkpoint(args, checkpoint_path=None, device=None):
             del (low, high, mask_val, outputs_val_1, outputs_val_2,
                  side1, side2, loss1, loss2, pred_val_1, pred_val_2)
 
+            if progress_callback is not None:
+                batch_size = int(data[0].shape[0])
+                progress_callback({
+                    'processed_samples': min((batch_index + 1) * batch_size, total_samples),
+                    'total_samples': total_samples,
+                })
+
     print_val_loss(val_loss_sup_1, val_loss_sup_2, {'val': num_batches}, 63, 0)
     val_eval_list_1, val_eval_list_2 = validation_metrics.compute()
     val_jaccard_list_1, val_jaccard_list_2 = validation_metrics.compute_jaccard()
@@ -211,6 +225,7 @@ def evaluate_checkpoint(args, checkpoint_path=None, device=None):
         'dataset_name': args.dataset_name,
         'class_type': args.class_type,
         'num_batches': num_batches,
+        'num_samples': total_samples,
         'validation_loss_branch_1': val_loss_sup_1 / num_batches,
         'validation_loss_branch_2': val_loss_sup_2 / num_batches,
         'metrics': {

@@ -48,6 +48,8 @@ class EvaluationRequest(BaseModel):
     """Validated inputs accepted by the web evaluation form."""
 
     name: str | None = Field(default=None, max_length=120)
+    training_run: str | None = Field(default=None, max_length=240)
+    fold: str | None = Field(default=None, max_length=64)
     checkpoints: list[str] = Field(min_length=1)
     output_dir: str = Field(min_length=1)
     test_list: str = Field(min_length=1)
@@ -244,6 +246,11 @@ class ViewerServer:
         with self.eval_lock:
             job = dict(self.eval_jobs[job_id])
         job["log_tail"] = self._job_log_tail(job)
+        progress_path = job.get("progress_file")
+        if isinstance(progress_path, str):
+            progress = read_json(Path(progress_path))
+            if progress:
+                job["progress"] = progress
         summary_path = job.get("summary_file")
         if job.get("status") == "completed" and isinstance(summary_path, str) and Path(summary_path).is_file():
             job["summary"] = read_json(Path(summary_path))
@@ -270,6 +277,7 @@ class ViewerServer:
         output_dir = self._resolve_project_path(Path(request.output_dir))
         checkpoint_list_path = output_dir / f"checkpoint_list_{job_id}.txt"
         log_path = output_dir / f"cross_eval_{job_id}{EVAL_JOB_LOG_SUFFIX}"
+        progress_path = output_dir / f"cross_eval_progress_{job_id}.json"
         summary_path = output_dir / "cross_eval_summary.json"
         manifest_path = output_dir / f"validation_job_{job_id}.json"
 
@@ -288,6 +296,7 @@ class ViewerServer:
                 "--batch_size", str(request.batch_size),
                 "--num_workers", str(request.num_workers),
                 "--output_dir", str(output_dir),
+                "--progress_file", str(progress_path),
             ]
             self._write_eval_log_header(log_path, job_id, command, request)
         except OSError as exc:
@@ -305,6 +314,7 @@ class ViewerServer:
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                     "error": str(exc),
                     "log_file": str(log_path),
+                    "progress_file": str(progress_path),
                     "summary_file": str(summary_path),
                     "checkpoint_list_file": str(checkpoint_list_path),
                     "manifest_file": str(manifest_path),
@@ -320,6 +330,7 @@ class ViewerServer:
                 "pid": None,
                 "command": command,
                 "log_file": str(log_path),
+                "progress_file": str(progress_path),
                 "summary_file": str(summary_path),
                 "checkpoint_list_file": str(checkpoint_list_path),
                 "manifest_file": str(manifest_path),
@@ -396,6 +407,7 @@ class ViewerServer:
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "error": error,
                 "log_file": str(log_path),
+                "progress_file": str(progress_path),
                 "summary_file": str(summary_path),
                 "checkpoint_list_file": str(checkpoint_list_path),
                 "manifest_file": str(manifest_path),
@@ -911,6 +923,8 @@ def create_app(results_root: Path = DEFAULT_RESULTS_ROOT) -> FastAPI:
                 "pid": None,
                 "request": {
                     "name": evaluation_name,
+                    "training_run": request.training_run,
+                    "fold": request.fold,
                     "checkpoints": resolved_checkpoints,
                     "output_dir": str(output_dir),
                     "test_list": str(test_list),

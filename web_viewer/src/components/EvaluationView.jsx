@@ -4,7 +4,6 @@ import {
   fetchEvaluationJobs,
   fetchEvaluationOptions,
   renameEvaluation,
-  startEvaluation,
 } from "../api.js";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle } from "./watermelon-ui.jsx";
 import { EvaluationResultTabs } from "./EvaluationResultTables.jsx";
@@ -37,6 +36,66 @@ function formatCheckpointScore(value) {
   if (value === null || value === undefined || value === "") return "—";
   const numericValue = Number(value);
   return Number.isFinite(numericValue) ? numericValue.toFixed(4) : "—";
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\"'\"'")}'`;
+}
+
+function trimTrailingSlashes(value) {
+  return String(value).replace(/\/+$/, "");
+}
+
+function checkpointListPath(outputDir, evaluationName) {
+  const name = evaluationName.trim().replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^\.+/, "");
+  const suffix = name || "manual";
+  return `${trimTrailingSlashes(outputDir)}/checkpoint_list_eval_${suffix}.txt`;
+}
+
+function buildCheckpointListPreparation(outputDir, listPath, checkpoints) {
+  return [
+    `mkdir -p ${shellQuote(outputDir)}`,
+    `printf '%s\\n' ${checkpoints.map(shellQuote).join(" ")} > ${shellQuote(listPath)}`,
+  ].join(" && \\\n");
+}
+
+function buildEvaluationArguments({ listPath, testList, datasetName, outputDir, progressPath }) {
+  return [
+    `--checkpoint_list ${shellQuote(listPath)}`,
+    `--test_list ${shellQuote(testList)}`,
+    `--dataset_name ${shellQuote(datasetName)}`,
+    "--class_type all",
+    "--batch_size 1",
+    "--num_workers 3",
+    `--output_dir ${shellQuote(outputDir)}`,
+    `--progress_file ${shellQuote(progressPath)}`,
+  ].join(" \\\n  ");
+}
+
+function CommandBox({ title, description, command, note }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return (
+    <section className="evaluation-command-box" aria-label={title}>
+      <div className="evaluation-command-heading">
+        <div><h3>{title}</h3><p>{description}</p></div>
+        <button type="button" className="evaluation-copy-button" onClick={handleCopy} disabled={!command}>
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre className={`evaluation-command ${command ? "" : "empty"}`}><code>{command || "Select checkpoints, a test list, and an output directory to generate this command."}</code></pre>
+      {note && <small className="evaluation-command-note">{note}</small>}
+    </section>
+  );
 }
 
 function CheckpointPicker({ checkpoints, selected, onChange, disabled, emptyMessage }) {
@@ -79,6 +138,10 @@ function JobCard({ job, onRenamed }) {
   const [renameError, setRenameError] = useState("");
   const request = job.request || {};
   const summary = job.summary || {};
+  const progress = job.progress || {};
+  const processedSamples = Number(progress.overall_processed_samples ?? progress.processed_samples ?? 0);
+  const totalSamples = Number(progress.overall_total_samples ?? progress.total_samples ?? 0);
+  const progressPercent = totalSamples > 0 ? Math.min(100, (processedSamples / totalSamples) * 100) : 0;
 
   useEffect(() => {
     if (!editingName) setDraftName(job.name || "");
@@ -118,6 +181,7 @@ function JobCard({ job, onRenamed }) {
           <span><label>Test list</label><strong title={request.test_list}>{shortPath(request.test_list)}</strong></span>
           <span><label>Output</label><strong title={request.output_dir}>{shortPath(request.output_dir)}</strong></span>
         </div>
+        {job.progress && <div className="evaluation-progress"><div className="evaluation-progress-heading"><span>Inference progress</span><strong>{totalSamples > 0 ? `${processedSamples.toLocaleString()} / ${totalSamples.toLocaleString()} samples` : "Preparing samples…"}</strong></div><div className="evaluation-progress-track"><span style={{ width: `${progressPercent}%` }} /></div><small>{progress.checkpoint_count ? `Checkpoint ${progress.checkpoint_index || 0} / ${progress.checkpoint_count}` : ""}{progress.checkpoint_name ? ` · ${progress.checkpoint_name}` : ""}</small></div>}
         {job.error && <div className="app-alert evaluation-alert">{job.error}</div>}
         {job.status === "completed" && <EvaluationResultTabs summary={summary} />}
         {job.status !== "completed" && job.log_tail && <pre className="evaluation-log">{job.log_tail}</pre>}
@@ -138,10 +202,8 @@ export default function EvaluationView() {
   const [datasetName, setDatasetName] = useState("brats19");
   const [evaluationName, setEvaluationName] = useState("");
   const [outputDir, setOutputDir] = useState("");
-  const [monitorInterval, setMonitorInterval] = useState("5");
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
   const loadOptions = useCallback(async () => {
@@ -189,13 +251,32 @@ export default function EvaluationView() {
     return () => window.clearInterval(timer);
   }, [loadJobs]);
 
-  const activeJob = jobs.find((job) => ["queued", "running"].includes(job.status));
   const selectedRun = (options.checkpoint_groups || []).find((group) => group.name === selectedRunName);
   const runCheckpoints = selectedRun?.checkpoints || [];
   const availableFolds = [...new Set(runCheckpoints.map((checkpoint) => checkpoint.fold_name).filter(Boolean))].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
   const foldCheckpoints = selectedFoldName === "all" ? runCheckpoints : runCheckpoints.filter((checkpoint) => checkpoint.fold_name === selectedFoldName);
   const visibleCheckpoints = showLastSave ? foldCheckpoints : foldCheckpoints.filter((checkpoint) => !checkpoint.is_last_save);
-  const canSubmit = selectedCheckpoints.length > 0 && testList.trim() && outputDir.trim() && !activeJob && !submitting;
+  const commandsReady = Boolean(selectedCheckpoints.length > 0 && testList.trim() && outputDir.trim());
+  const commandPaths = useMemo(() => {
+    const listPath = checkpointListPath(outputDir || "result/cross_eval", evaluationName);
+    const progressPath = `${trimTrailingSlashes(outputDir || "result/cross_eval")}/cross_eval_progress_manual.json`;
+    const preparation = commandsReady
+      ? buildCheckpointListPreparation(outputDir.trim(), listPath, selectedCheckpoints)
+      : "";
+    const argumentsBlock = commandsReady
+      ? buildEvaluationArguments({
+        listPath,
+        testList: testList.trim(),
+        datasetName,
+        outputDir: outputDir.trim(),
+        progressPath,
+      })
+      : "";
+    return {
+      direct: preparation ? `${preparation} && \\\npython cross_eval.py \\\n  ${argumentsBlock}` : "",
+      pbs: preparation ? `${preparation} && \\\nqsub -v HFF_GPU_DEVICE=REPLACE_WITH_MIG_UUID -- scripts/submit_eval_gpu.pbs \\\n  ${argumentsBlock}` : "",
+    };
+  }, [commandsReady, datasetName, evaluationName, outputDir, selectedCheckpoints, testList]);
 
   const handleRunChange = (event) => {
     setSelectedRunName(event.target.value);
@@ -221,29 +302,6 @@ export default function EvaluationView() {
     }
   };
 
-  const handleSubmit = async (event) => {
-    event.preventDefault();
-    if (!canSubmit) return;
-    setSubmitting(true);
-    setError("");
-    try {
-      const job = await startEvaluation({
-        checkpoints: selectedCheckpoints,
-        name: evaluationName.trim() || null,
-        test_list: testList.trim(),
-        output_dir: outputDir.trim(),
-        dataset_name: datasetName,
-        class_type: "all",
-        resource_monitor_interval: Number(monitorInterval),
-      });
-      setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
-    } catch (submitError) {
-      setError(submitError.message);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   const handleJobRenamed = (updatedJob) => {
     setJobs((current) => current.map((job) => job.id === updatedJob.id ? updatedJob : job));
   };
@@ -258,22 +316,20 @@ export default function EvaluationView() {
       {error && <div className="app-alert evaluation-alert">{error}</div>}
 
       <div className="evaluation-layout">
-        <form className="evaluation-form" onSubmit={handleSubmit}>
+        <div className="evaluation-form">
           <Card className="evaluation-form-card">
-            <CardHeader><div><CardTitle>Evaluation setup</CardTitle><div className="wm-card-description">The backend launches <code>cross_eval.py</code> with these exact selections.</div></div></CardHeader>
+            <CardHeader><div><CardTitle>Evaluation setup</CardTitle><div className="wm-card-description">Select the inputs below, then copy one of the generated commands. This page does not launch evaluation directly.</div></div></CardHeader>
             <CardContent>
-              <div className="evaluation-field"><label htmlFor="evaluation-run">Training run</label><select id="evaluation-run" value={selectedRunName} onChange={handleRunChange} disabled={Boolean(activeJob) || submitting}><option value="">Select a training run</option>{(options.checkpoint_groups || []).map((group) => <option key={group.name} value={group.name}>{group.label || group.name}</option>)}</select><small>Choose the training configuration first, then select its checkpoints.</small></div>
-              <div className="evaluation-field"><label>Checkpoints <span>{selectedCheckpoints.length} selected</span></label><div className="evaluation-checkpoint-toolbar"><label className="evaluation-fold-filter" htmlFor="checkpoint-fold"><span>Fold</span><select id="checkpoint-fold" value={selectedFoldName} onChange={(event) => setSelectedFoldName(event.target.value)} disabled={!selectedRun || Boolean(activeJob) || submitting}><option value="all">All folds</option>{availableFolds.map((foldName) => <option key={foldName} value={foldName}>{foldName}</option>)}</select></label><span>{selectedRun ? `${visibleCheckpoints.length} shown of ${runCheckpoints.length} checkpoint(s) · newest saves first` : "Select a training run to see checkpoints"}</span><label className="evaluation-switch"><input type="checkbox" checked={showLastSave} onChange={handleShowLastSaveChange} disabled={!selectedRun || Boolean(activeJob) || submitting} /><span className="evaluation-switch-track" aria-hidden="true" /><strong>Show Last Save</strong></label></div><CheckpointPicker checkpoints={visibleCheckpoints} selected={selectedCheckpoints} onChange={setSelectedCheckpoints} disabled={Boolean(activeJob) || submitting} emptyMessage={selectedRun ? "No score-named checkpoints were found for this training run." : "Select a training run to see checkpoints."} /></div>
-              <div className="evaluation-field"><label htmlFor="evaluation-name">Evaluation name <span>Optional</span></label><input id="evaluation-name" value={evaluationName} maxLength={120} onChange={(event) => setEvaluationName(event.target.value)} placeholder="e.g. BraTS 2019 baseline" disabled={Boolean(activeJob) || submitting} /><small>Use a memorable label, or leave blank to keep the generated job ID.</small></div>
-              <div className="evaluation-field"><label htmlFor="test-list">Test list</label><select id="test-list" value={testList} onChange={(event) => setTestList(event.target.value)} disabled={Boolean(activeJob) || submitting}><option value="">Select a discovered test list</option>{(options.test_lists || []).map((item) => <option key={item.path} value={item.path}>{item.label}</option>)}</select><input aria-label="Custom test list path" value={testList} onChange={(event) => setTestList(event.target.value)} placeholder="Or enter an absolute/custom test-list path" disabled={Boolean(activeJob) || submitting} /></div>
-              <div className="evaluation-field-row"><div className="evaluation-field"><label htmlFor="dataset-name">Dataset</label><select id="dataset-name" value={datasetName} onChange={(event) => setDatasetName(event.target.value)} disabled={Boolean(activeJob) || submitting}><option value="brats19">BraTS 2019</option><option value="brats20">BraTS 2020</option><option value="brats23men">BraTS 2023 meningioma</option><option value="msdbts">MSD BraTS</option></select></div><div className="evaluation-field"><label htmlFor="class-type">Labels</label><input id="class-type" value="All labels" readOnly aria-describedby="class-type-note" /><small id="class-type-note">HFF-Net checkpoints are evaluated with all trained classes.</small></div></div>
-              <div className="evaluation-field"><label htmlFor="output-dir">Output directory</label><input id="output-dir" value={outputDir} onChange={(event) => setOutputDir(event.target.value)} placeholder="result/cross_eval" disabled={Boolean(activeJob) || submitting} /><small>Relative paths are resolved from the HFF project root.</small></div>
-              <div className="evaluation-field"><label htmlFor="monitor-interval">Telemetry interval (seconds)</label><input id="monitor-interval" type="number" min="1" max="300" step="1" value={monitorInterval} onChange={(event) => setMonitorInterval(event.target.value)} disabled={Boolean(activeJob) || submitting} /><small>Samples are written to JSONL and summarized at the end of the job.</small></div>
-              <Button type="submit" className="evaluation-submit" disabled={!canSubmit}>{submitting ? "Starting…" : activeJob ? "Evaluation running…" : "Start evaluation"}</Button>
-              {activeJob && <div className="evaluation-running-note"><span className="topbar-pulse" /> Job <code>{activeJob.id}</code> is running. Only one GPU evaluation is allowed at a time.</div>}
+              <div className="evaluation-field"><label htmlFor="evaluation-run">Training run</label><select id="evaluation-run" value={selectedRunName} onChange={handleRunChange}><option value="">Select a training run</option>{(options.checkpoint_groups || []).map((group) => <option key={group.name} value={group.name}>{group.label || group.name}</option>)}</select><small>Choose the training configuration first, then select its checkpoints.</small></div>
+              <div className="evaluation-field"><label>Checkpoints <span>{selectedCheckpoints.length} selected</span></label><div className="evaluation-checkpoint-toolbar"><label className="evaluation-fold-filter" htmlFor="checkpoint-fold"><span>Fold</span><select id="checkpoint-fold" value={selectedFoldName} onChange={(event) => setSelectedFoldName(event.target.value)} disabled={!selectedRun}><option value="all">All folds</option>{availableFolds.map((foldName) => <option key={foldName} value={foldName}>{foldName}</option>)}</select></label><span>{selectedRun ? `${visibleCheckpoints.length} shown of ${runCheckpoints.length} checkpoint(s) · newest saves first` : "Select a training run to see checkpoints"}</span><label className="evaluation-switch"><input type="checkbox" checked={showLastSave} onChange={handleShowLastSaveChange} disabled={!selectedRun} /><span className="evaluation-switch-track" aria-hidden="true" /><strong>Show Last Save</strong></label></div><CheckpointPicker checkpoints={visibleCheckpoints} selected={selectedCheckpoints} onChange={setSelectedCheckpoints} emptyMessage={selectedRun ? "No score-named checkpoints were found for this training run." : "Select a training run to see checkpoints."} /></div>
+              <div className="evaluation-field"><label htmlFor="evaluation-name">Evaluation name <span>Optional</span></label><input id="evaluation-name" value={evaluationName} maxLength={120} onChange={(event) => setEvaluationName(event.target.value)} placeholder="e.g. BraTS 2019 baseline" /><small>Used to make the generated checkpoint-list filename easier to recognize.</small></div>
+              <div className="evaluation-field"><label htmlFor="test-list">Test list</label><select id="test-list" value={testList} onChange={(event) => setTestList(event.target.value)}><option value="">Select a discovered test list</option>{(options.test_lists || []).map((item) => <option key={item.path} value={item.path}>{item.label}</option>)}</select><input aria-label="Custom test list path" value={testList} onChange={(event) => setTestList(event.target.value)} placeholder="Or enter an absolute/custom test-list path" /></div>
+              <div className="evaluation-field-row"><div className="evaluation-field"><label htmlFor="dataset-name">Dataset</label><select id="dataset-name" value={datasetName} onChange={(event) => setDatasetName(event.target.value)}><option value="brats19">BraTS 2019</option><option value="brats20">BraTS 2020</option><option value="brats23men">BraTS 2023 meningioma</option><option value="msdbts">MSD BraTS</option></select></div><div className="evaluation-field"><label htmlFor="class-type">Labels</label><input id="class-type" value="All labels" readOnly aria-describedby="class-type-note" /><small id="class-type-note">HFF-Net checkpoints are evaluated with all trained classes.</small></div></div>
+              <div className="evaluation-field"><label htmlFor="output-dir">Output directory</label><input id="output-dir" value={outputDir} onChange={(event) => setOutputDir(event.target.value)} placeholder="result/cross_eval" /><small>Relative paths are resolved from the HFF project root.</small></div>
+              <div className="evaluation-command-section"><div className="evaluation-command-section-heading"><h2>Run commands</h2><p>Run these from the HFF repository root. Neither box starts a job from the viewer.</p></div><CommandBox title="1. Direct command" description="Runs cross_eval.py in the current shell." command={commandPaths.direct} /><CommandBox title="2. PBS / workq command" description="Submits one GPU job to the institute PBS workq queue." command={commandPaths.pbs} note="Replace REPLACE_WITH_MIG_UUID with the allocated value from nvidia-smi -L before submitting." /></div>
             </CardContent>
           </Card>
-        </form>
+        </div>
 
         <section className="evaluation-history"><div className="evaluation-section-heading"><div><h2>Evaluation history</h2><p>Results remain in each selected output directory.</p></div><span>{jobs.length} jobs</span></div>{loading ? <div className="evaluation-empty">Loading evaluation options…</div> : jobs.length ? jobs.map((job) => <JobCard key={job.id} job={job} onRenamed={handleJobRenamed} />) : <div className="evaluation-empty"><strong>No evaluation jobs yet</strong><span>Select one or more checkpoints to begin.</span></div>}</section>
       </div>

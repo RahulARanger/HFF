@@ -44,6 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path('./result/cross_eval'),
         help='Directory for per-checkpoint JSON files and the aggregate summary.',
     )
+    parser.add_argument(
+        '--progress_file',
+        type=Path,
+        default=None,
+        help='Optional JSON file updated with sample-level inference progress.',
+    )
     add_evaluation_arguments(
         parser,
         include_checkpoint=False,
@@ -197,6 +203,13 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary_path.replace(path)
 
 
+def write_progress(path: Path | None, payload: dict[str, Any]) -> None:
+    """Persist progress so a parent process can expose it to the web UI."""
+    if path is None:
+        return
+    write_json(path.expanduser().resolve(), payload)
+
+
 def checkpoint_result_path(output_dir: Path, index: int, checkpoint: Path) -> Path:
     safe_stem = re.sub(r'[^A-Za-z0-9._-]+', '_', checkpoint.stem)
     return output_dir / f'checkpoint_{index:03d}_{safe_stem}.json'
@@ -208,17 +221,64 @@ def main() -> int:
     checkpoints = read_checkpoint_list(checkpoint_list)
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    progress_file = args.progress_file.expanduser().resolve() if args.progress_file else None
 
     results: list[dict[str, Any]] = []
     result_files: list[str] = []
+    write_progress(progress_file, {
+        'phase': 'starting',
+        'checkpoint_index': 0,
+        'checkpoint_count': len(checkpoints),
+        'processed_samples': 0,
+        'total_samples': None,
+        'overall_processed_samples': 0,
+        'overall_total_samples': None,
+    })
     for index, checkpoint in enumerate(checkpoints, start=1):
         LOGGER.info('Evaluating checkpoint %d/%d: %s', index, len(checkpoints), checkpoint)
-        result = json_safe_result(evaluate_checkpoint(args, checkpoint_path=checkpoint))
+
+        def report_progress(update: dict[str, Any]) -> None:
+            total_samples = update.get('total_samples')
+            processed_samples = update.get('processed_samples', 0)
+            overall_total = total_samples * len(checkpoints) if isinstance(total_samples, int) else None
+            overall_processed = (
+                (index - 1) * total_samples + processed_samples
+                if isinstance(total_samples, int)
+                else 0
+            )
+            write_progress(progress_file, {
+                'phase': 'inference',
+                'checkpoint_index': index,
+                'checkpoint_count': len(checkpoints),
+                'checkpoint_name': checkpoint.name,
+                'processed_samples': processed_samples,
+                'total_samples': total_samples,
+                'overall_processed_samples': overall_processed,
+                'overall_total_samples': overall_total,
+            })
+
+        result = json_safe_result(
+            evaluate_checkpoint(
+                args,
+                checkpoint_path=checkpoint,
+                progress_callback=report_progress,
+            )
+        )
         result_path = checkpoint_result_path(output_dir, index, checkpoint)
         write_json(result_path, result)
         results.append(result)
         result_files.append(str(result_path))
         LOGGER.info('Saved checkpoint result to %s', result_path)
+        write_progress(progress_file, {
+            'phase': 'checkpoint_complete',
+            'checkpoint_index': index,
+            'checkpoint_count': len(checkpoints),
+            'checkpoint_name': checkpoint.name,
+            'processed_samples': result.get('num_samples', 0),
+            'total_samples': result.get('num_samples', 0),
+            'overall_processed_samples': index * result.get('num_samples', 0),
+            'overall_total_samples': len(checkpoints) * result.get('num_samples', 0),
+        })
 
     summary = {
         'checkpoint_list': str(checkpoint_list),
@@ -231,6 +291,16 @@ def main() -> int:
     }
     summary_path = output_dir / 'cross_eval_summary.json'
     write_json(summary_path, summary)
+    completed_samples = results[-1].get('num_samples', 0) if results else 0
+    write_progress(progress_file, {
+        'phase': 'completed',
+        'checkpoint_index': len(checkpoints),
+        'checkpoint_count': len(checkpoints),
+        'processed_samples': completed_samples,
+        'total_samples': completed_samples,
+        'overall_processed_samples': len(results) * completed_samples,
+        'overall_total_samples': len(results) * completed_samples,
+    })
 
     LOGGER.info('Saved cross-checkpoint summary to %s', summary_path)
     print('\nAverage across %d checkpoints:' % len(results))

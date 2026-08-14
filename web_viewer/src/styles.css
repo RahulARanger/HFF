@@ -150,9 +150,21 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .evaluation-checkpoint-scores small { color: #718896; font-size: 8px; font-weight: 700; }
 .evaluation-checkpoint-scores strong { color: #d9edf2; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; font-variant-numeric: tabular-nums; }
 .evaluation-last-save-note { color: #9a8a62; font-size: 8px; }
-.evaluation-submit { width: 100%; min-height: 41px; margin-top: 20px; border-color: transparent; font-size: 12px; }
-.evaluation-running-note { display: flex; align-items: center; gap: 7px; margin-top: 12px; color: #8ca1ae; font-size: 10px; line-height: 1.4; }
-.evaluation-running-note code, .evaluation-job-card code { color: #a9c7da; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.evaluation-job-card code { color: #a9c7da; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.evaluation-command-section { margin-top: 22px; padding-top: 18px; border-top: 1px solid #233444; }
+.evaluation-command-section-heading h2 { margin: 0; color: #f5f8f9; font-size: 14px; }
+.evaluation-command-section-heading p { margin: 5px 0 0; color: #8497a4; font-size: 10px; line-height: 1.45; }
+.evaluation-command-box { margin-top: 12px; border: 1px solid #233444; border-radius: 6px; background: #080f16; }
+.evaluation-command-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 11px 8px; border-bottom: 1px solid #233444; }
+.evaluation-command-heading h3 { margin: 0; color: #e8f1f4; font-size: 11px; }
+.evaluation-command-heading p { margin: 4px 0 0; color: #7e919e; font-size: 9px; }
+.evaluation-copy-button { min-height: 26px; padding: 0 9px; border: 1px solid #2b5773; border-radius: 4px; color: #8dc9ed; background: rgba(0, 112, 243, 0.08); font-size: 9px; cursor: pointer; }
+.evaluation-copy-button:hover:not(:disabled) { border-color: var(--blue); color: #ffffff; background: rgba(0, 112, 243, 0.2); }
+.evaluation-copy-button:disabled { cursor: not-allowed; opacity: 0.45; }
+.evaluation-command { max-height: 220px; overflow: auto; margin: 0; padding: 11px; color: #b9e5e4; background: #03070a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.evaluation-command.empty { color: #718896; }
+.evaluation-command code { font: inherit; }
+.evaluation-command-note { display: block; padding: 8px 11px 10px; border-top: 1px solid #233444; color: var(--amber); font-size: 9px; line-height: 1.45; }
 .evaluation-history { min-width: 0; }
 .evaluation-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; margin: 0 0 12px; }
 .evaluation-section-heading h2 { margin: 0; color: #f5f8f9; font-size: 17px; }
@@ -177,6 +189,12 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .evaluation-job-meta span, .evaluation-average-grid > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; padding: 9px; border: 1px solid #233444; background: #080f16; }
 .evaluation-job-meta label, .evaluation-average-grid span { color: #7f919d; font-size: 9px; }
 .evaluation-job-meta strong { overflow: hidden; color: #dbe6eb; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.evaluation-progress { margin-top: 10px; padding: 9px; border: 1px solid #233444; background: #080f16; }
+.evaluation-progress-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; color: #8ea0ad; font-size: 9px; }
+.evaluation-progress-heading strong { color: #dbe6eb; font-size: 9px; font-variant-numeric: tabular-nums; }
+.evaluation-progress-track { height: 6px; margin-top: 7px; overflow: hidden; border-radius: 999px; background: #26333e; }
+.evaluation-progress-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), var(--teal)); transition: width 220ms ease; }
+.evaluation-progress small { display: block; min-height: 11px; margin-top: 6px; color: #718896; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 8px; }
 .evaluation-average-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
 .evaluation-average-grid > div { border-color: rgba(80, 227, 194, 0.38); background: rgba(80, 227, 194, 0.05); }
 .evaluation-average-grid strong { overflow: hidden; color: var(--teal); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
@@ -277,6 +295,7 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .monitor-status.completed { border-color: rgba(80, 227, 194, 0.45); }
 .monitor-status.stale { border-color: rgba(245, 194, 66, 0.45); }
 .monitor-run-card-meta { display: flex; align-items: center; justify-content: space-between; margin-top: 5px; color: #8193a2; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+.monitor-run-log-path { overflow: hidden; margin-top: 4px; color: #5e9bd0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .run-arrow { color: #d9e6ee; font-family: inherit; font-size: 22px; font-weight: 300; line-height: 0.5; }
 .run-progress-line { height: 7px; margin-top: 8px; }
 .monitor-run-card-epochs { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; color: #a8b5bf; font-size: 10px; font-variant-numeric: tabular-nums; }
@@ -381,6 +400,8 @@ button:disabled, select:disabled, input:disabled { cursor: not-allowed; opacity:
 .monitor-data-list dt { color: #7f919d; font-size: 10px; }
 .monitor-data-list dd { max-width: 68%; margin: 0; overflow: hidden; color: #d5e1e7; font-size: 10px; font-variant-numeric: tabular-nums; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .monitor-path { color: #60aeff !important; }
+.monitor-config-paths { display: flex; max-width: 68%; flex-direction: column; align-items: flex-end; gap: 3px; }
+.monitor-config-paths code { max-width: 100%; overflow: hidden; color: #60aeff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .monitor-note-panel p { min-height: 70px; margin: 0; padding: 15px 14px 8px; color: #9cabb4; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.55; }
 .monitor-note-mark { display: grid; place-items: center; width: 15px; height: 15px; border: 1px solid #5d7890; border-radius: 50%; color: #9db9ca; font-size: 9px; }
 .monitor-process-line { display: flex; align-items: center; gap: 8px; margin: 0 14px 13px; padding-top: 10px; border-top: 1px solid #1d2b37; color: #7f919d; font-size: 10px; }
